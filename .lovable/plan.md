@@ -1,122 +1,62 @@
 
-## Root Cause: Wrong Environment Key Poisons All Order Calls
+## Problem
 
-### What Is Actually Happening
+The `callProxy` function in `useDrGreenApi.ts` reads `localStorage` via `getCurrentEnvironment()` and passes whatever is stored there as `env` to the proxy. If an admin previously set `railway` in the environment selector, ALL API calls — including patient order flows — send `env: "railway"` to the proxy, which uses the broken staging key and causes 400 errors and key parsing failures.
 
-The logs show the error is not the cart endpoint URL — it is a key parsing failure that prevents any API call from being made at all:
+The safety guard added in the last diff only catches `railway` for a hardcoded list of transactional actions. But:
+- Any action NOT in that list still leaks to railway
+- The root issue — `useDrGreenApi.ts` reading localStorage at all — remains unfixed
 
-```
-[Error] secp256k1: Failed to extract private key { error: "Error: Expected SEQUENCE" }
-[Error] Proxy error { message: "Failed to parse secp256k1 private key: Error: Expected SEQUENCE" }
-```
+## The Fix
 
-The decoded key is only **24 bytes** (`decodedLength: 24`). A valid secp256k1 private key requires 32 raw bytes minimum, or ~88 bytes for SEC1 DER format, or ~138 bytes for PKCS#8 DER. 24 bytes is not a parseable key structure.
+The `useDrGreenApi` hook must **never read localStorage**. It is a patient and data-layer hook, not an admin tool. The env selector in Admin Settings is only for explicit admin debug tools (API Test Runner, Comparison Dashboard) which should manage env themselves.
 
-### Why It Is Using the Wrong Key
+### Changes
 
-The `ApiEnvironmentContext` stores the user-selected environment in `localStorage` under `hb-api-environment`. Admin settings let you switch between `production` and `railway`. 
+**1. `src/hooks/useDrGreenApi.ts`**
 
-`useDrGreenApi.ts` line 39:
+- Remove `getCurrentEnvironment()` entirely from the file
+- Remove `ENV_STORAGE_KEY` constant
+- Change `callProxy` so when no `overrideEnv` is passed, it **always sends `'production'`** — not localStorage
+- The function signature stays the same; admin tools that explicitly pass `overrideEnv` (e.g. `callProxy('dapp-clients', params, adminEnv)`) continue to work as before
+
+Before:
 ```typescript
 const env = overrideEnv || getCurrentEnvironment(); // reads localStorage
 ```
 
-Then line 42:
+After:
 ```typescript
-body: { action, env, ...data }  // sends env: "railway" to proxy
+const env = overrideEnv || 'production'; // always production unless explicitly overridden
 ```
 
-The proxy line 379–382:
+**2. `supabase/functions/drgreen-proxy/index.ts`**
+
+Expand the `PATIENT_TRANSACTIONAL_ACTIONS` guard to be a full "default to production" rule: if no env is provided OR env is `'railway'` for any action that isn't explicitly an admin debug action, force `'production'`. This is a server-side belt-and-suspenders guarantee.
+
+Concretely, replace the narrow railway-only guard with:
 ```typescript
-railway: {
-  apiUrl: 'https://budstack-backend-main-development.up.railway.app/api/v1',
-  apiKeyEnv: 'DRGREEN_STAGING_API_KEY',
-  privateKeyEnv: 'DRGREEN_STAGING_PRIVATE_KEY',  // ← broken key, 24 bytes
-}
+// Any action NOT explicitly admin/debug always uses production
+const ADMIN_DEBUG_ONLY_ACTIONS = [
+  'dapp-clients', 'dapp-orders', 'dashboard-summary', 
+  'get-sales', 'dapp-strains', /* ...other admin test actions */
+];
+const forceProduction = !ADMIN_DEBUG_ONLY_ACTIONS.includes(action);
+const effectiveEnv = forceProduction ? 'production' : (requestedEnv || 'production');
 ```
 
-So when the browser has `railway` in localStorage (set by whoever last touched Admin Settings), **every** patient-facing action — including cart clear, cart add, and order creation — uses the staging private key. That key is corrupted/truncated and throws before even making an HTTP request to Dr. Green.
-
-The `sync-strains` function works because it is a separate Edge Function that reads `DRGREEN_API_KEY` + `DRGREEN_PRIVATE_KEY` directly, bypassing the environment selector entirely.
-
-### The Fix: Two-Layer Isolation
-
-**Layer 1 — Force `production` on all patient-facing proxy calls (the fast fix)**
-
-In `src/hooks/useDrGreenApi.ts`, the `callProxy` function currently passes whatever is in localStorage as `env`. Patient-facing actions (`create-order`, `add-to-cart`, `get-orders`, `create-payment`, `get-my-details`, `update-shipping`, etc.) must always run against `production` regardless of what the admin selector has set.
-
-Change: pass `overrideEnv: 'production'` as the third argument to `callProxy` for all non-admin actions. Admin comparison/testing tools can continue using the context value.
-
-**Layer 2 — Proxy-side guard: never use railway for order/cart/payment actions**
-
-In `supabase/functions/drgreen-proxy/index.ts`, add an explicit safeguard in the `create-order`, `add-to-cart`, and `create-payment` case blocks: if `requestedEnv === 'railway'`, override to `production` and log a warning. This means even if client-side code ever passes railway again, the proxy rejects it for transactional operations.
-
-**Layer 3 — Admin Settings UI: warn that railway is for admin tools only**
-
-In `src/pages/AdminSettings.tsx`, add a visible notice that the environment selector only affects Admin Tools (test runner, comparison dashboard) and has no effect on patient checkout or orders.
-
----
+This means the only way to ever hit railway is if an admin debug action explicitly requests it.
 
 ### Files to Change
 
 | File | Change |
 |---|---|
-| `src/hooks/useDrGreenApi.ts` | All patient-facing `callProxy` calls: pass `'production'` as `overrideEnv` explicitly. Only the admin comparison calls should read the context env. |
-| `supabase/functions/drgreen-proxy/index.ts` | In `create-order`, `add-to-cart`, `create-payment` case blocks: if `requestedEnv === 'railway'`, force `production` and log `[SECURITY] Forcing production for transactional action`. |
-| `src/pages/AdminSettings.tsx` | Add an info banner: "Environment selector applies to Admin Tools only. Patient checkout always uses Production." |
-
----
-
-### Technical Detail: useDrGreenApi.ts Changes
-
-Currently every method calls `callProxy(action, data)` with no `overrideEnv`. The fix tags each call:
-
-```typescript
-// Patient-facing actions — ALWAYS production
-const createOrder = (orderData) =>
-  callProxy('create-order', { data: orderData }, 'production');
-
-const createPayment = (paymentData) =>
-  callProxy('create-payment', paymentData, 'production');
-
-const getOrders = (clientId) =>
-  callProxy('get-orders', { clientId }, 'production');
-
-const getMyDetails = () =>
-  callProxy('get-my-details', {}, 'production');
-
-const updateShipping = (data) =>
-  callProxy('update-shipping', data, 'production');
-
-// Admin-only actions — use context env (caller must pass it explicitly)
-// getDappClients, getClientsSummary, getStrains — these remain flexible
-```
-
-### Technical Detail: Proxy Guard
-
-At line ~1971 in the proxy, after `const envConfig = getEnvironment(requestedEnv)`, add:
-
-```typescript
-const PATIENT_TRANSACTIONAL_ACTIONS = [
-  'create-order', 'add-to-cart', 'create-payment', 
-  'get-payment', 'update-shipping', 'get-my-details', 'get-orders'
-];
-
-let adminEnvConfig = envConfig;
-if (PATIENT_TRANSACTIONAL_ACTIONS.includes(action) && requestedEnv === 'railway') {
-  console.warn(`[drgreen-proxy] SAFETY: Forcing production for transactional action "${action}" (requested: railway)`);
-  adminEnvConfig = ENV_CONFIG.production;
-}
-```
+| `src/hooks/useDrGreenApi.ts` | Remove `getCurrentEnvironment()` and `ENV_STORAGE_KEY`. Change `callProxy` default from `getCurrentEnvironment()` to `'production'` |
+| `supabase/functions/drgreen-proxy/index.ts` | Replace the narrow transactional-action guard with a whitelist approach: only explicitly-listed admin debug actions can use a non-production env |
 
 ### Expected Outcome
 
-After these changes:
-- Patient places order → proxy uses `DRGREEN_API_KEY` + `DRGREEN_PRIVATE_KEY` (production, valid keys) → signing succeeds → cart cleared → items added → order created → real `orderId` returned
-- Admin tests railway in API Test Runner → still uses staging keys (that tool passes explicit env)
-- Browser localStorage `hb-api-environment = "railway"` no longer breaks patient checkout
-- Even if `railway` leaks into a proxy call for a transactional action, the proxy guard catches it
-
-### Deploy Step
-
-After editing the proxy, redeploy `drgreen-proxy`. The `useDrGreenApi.ts` change is frontend-only (no deploy needed beyond the normal build).
+- Patient opens shop, adds to cart, places order → always production keys → signing works → order succeeds
+- Admin opens API Test Runner with Railway selected → that component passes `overrideEnv = 'railway'` explicitly → still works
+- No localStorage read ever affects patient-facing flows again
+- Even if something slips through client-side, the proxy's whitelist guard ensures only admin debug actions can use railway
