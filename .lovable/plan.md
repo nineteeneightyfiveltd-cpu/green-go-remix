@@ -1,52 +1,52 @@
 
-## Fix: Provision Auth Accounts for All Synced Clients
 
-### The Problem
+## Fix: Shipping Address Pre-Population and Country-Relevant Placeholders
 
-9 clients were synced from the Dr. Green API into `public.drgreen_clients` but have no corresponding login accounts (`user_id = null`). Without an auth account, those clients cannot log in. The `admin-update-user` edge function already exists and is capable of creating auth users using the Service Role Key.
+### Problem 1: Shipping Address Not Pulled from DApp
 
-### What Will Be Done
+The `sync-clients` edge function has two bugs preventing full address data from syncing:
 
-#### 1. Create a new `admin-provision-users` edge function
+**Bug A -- Strict `address1` guard (line ~284):** The code `dappShipping?.address1 ? {...} : null` only builds a shipping object when `address1` is truthy. If the DApp API returns the street under a slightly different key, or if there is partial data (city, country but no street yet), it skips the entire object. The guard should be relaxed: build the object if *any* shipping entry exists.
 
-A dedicated Supabase Edge Function that:
+**Bug B -- Update condition too narrow (line ~300):** `needsShippingUpdate = shippingAddress && !existing.shipping_address` evaluates to `false` when a partial record already exists in the DB (e.g. `{country: "South Africa", address2: "", state: ""}`). It should check whether the local record is missing `address1` specifically, and overwrite if the DApp has a richer version.
 
-- Fetches all `drgreen_clients` records where `user_id IS NULL`
-- For each, calls the Supabase Admin API to create an auth user with:
-  - Their email from `drgreen_clients`
-  - Password: `12345678`
-  - Email pre-confirmed (`email_confirm: true`)
-- After creating the auth user:
-  - Updates `drgreen_clients.user_id` to link the record
-  - Inserts a `profiles` row with their full name
-  - If the email is `scott@healingbuds.global` or `healingbudsglobal@gmail.com`, inserts an admin role into `user_roles`
-- Returns a detailed summary: created / skipped (already exists) / failed
-- Uses the built-in `SUPABASE_SERVICE_ROLE_KEY` (already available)
+Additionally, debug logging will be added to capture the raw `client.shippings` array from the API so we can confirm the exact field names returned.
 
-#### 2. Add a "Provision All Users" button to the Admin Clients page
+### Problem 2: Hardcoded Placeholders Not Country-Relevant
 
-In `src/pages/AdminClients.tsx`, add a prominent button that:
+The `ShippingAddressForm` currently shows generic placeholders like "123 Main Street", "Lisbon", "Apt 4B" regardless of which country is selected. These should change dynamically based on the country dropdown selection.
 
-- Calls the new `admin-provision-users` edge function
-- Shows a loading state during provisioning
-- Displays the result (e.g. "9 accounts created, 0 skipped, 0 failed") as a toast
+### Changes
 
-#### 3. Update `sync-clients` to auto-provision on future syncs
+#### 1. `supabase/functions/sync-clients/index.ts`
 
-Inside `supabase/functions/sync-clients/index.ts`, after inserting a new unlinked client (where no auth user was found by email), automatically attempt to create the auth account in the same pass. This prevents the gap from recurring on future syncs.
+- Relax the `address1` guard: build `shippingAddress` object whenever `dappShipping` exists (not only when `address1` is present)
+- Fix the update condition: update if local `shipping_address` is null OR if its `address1` is empty/missing while the DApp has a non-empty `address1`
+- Add field name fallbacks (`addressLine1`, `zipCode`, etc.) for robustness
+- Add `console.log` for first 3 clients to dump raw `shippings` array for debugging
+- Deploy and re-sync
 
-### Technical Notes
+#### 2. `src/components/shop/ShippingAddressForm.tsx`
 
-- Uses `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` — both already set as built-in secrets
-- No database migrations required — existing `drgreen_clients`, `profiles`, and `user_roles` tables are sufficient
-- The `auto_link_drgreen_client` trigger is bypassed intentionally here since we are linking in the same operation
-- Clients provisioned: `varseainc@gmail.com`, `maykendaal23@gmail.com`, `scott.k1@outlook.com`, `kayliegh.sm@gmail.com`, `scott@healingbuds.global`, `testhb@yopmail.com`, `test9876@yopmail.com`, `wwe2xjhickei@drewzen.com`, `testflow3@healingbuds.test`
-- `scott@healingbuds.global` and `healingbudsglobal@gmail.com` will be assigned admin roles
+Add a country-specific placeholder map that updates dynamically when the country dropdown changes:
 
-### Files to Create/Edit
+| Field | PT (Portugal) | ZA (South Africa) | GB (United Kingdom) | TH (Thailand) |
+|---|---|---|---|---|
+| Street Address | Rua Augusta 100 | 123 Rivonia Road | 10 Downing Street | 123 Sukhumvit Road |
+| Apartment | Andar 3 | Unit 5B | Flat 2A | Room 4B |
+| City | Lisbon | Johannesburg | London | Bangkok |
+| State/Province | Lisboa | Gauteng | England | Krung Thep |
+| Postal Code | 1000-001 | 2196 | SW1A 1AA | 10110 |
+| Landmark | Perto da Praca | Near Sandton City | Near Westminster | Near BTS Asok |
 
-| File | Action |
+The postal code placeholder already adapts via `postalCodePatterns[selectedCountry]?.example`. The remaining fields (street, city, state, apartment, landmark) will use the same `selectedCountry` watch value.
+
+### Technical Details
+
+**Files to edit:**
+
+| File | Change |
 |---|---|
-| `supabase/functions/admin-provision-users/index.ts` | Create new edge function |
-| `src/pages/AdminClients.tsx` | Add "Provision All Users" button |
-| `supabase/functions/sync-clients/index.ts` | Add auto-provision logic for future syncs |
+| `supabase/functions/sync-clients/index.ts` | Fix address guard, fix update condition, add debug logging, add field fallbacks |
+| `src/components/shop/ShippingAddressForm.tsx` | Add country-specific placeholder map, update all Input placeholders to be dynamic |
+
