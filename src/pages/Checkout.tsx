@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, ShoppingBag, CreditCard, CheckCircle2, AlertCircle, Loader2, MapPin, Home, Building2, Clock, Info } from 'lucide-react';
+import { ArrowLeft, ShoppingBag, CreditCard, AlertCircle, Loader2, MapPin, Home, Building2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
@@ -13,12 +13,14 @@ import Footer from '@/components/Footer';
 import { useShop } from '@/context/ShopContext';
 import { EligibilityGate } from '@/components/shop/EligibilityGate';
 import { ShippingAddressForm, type ShippingAddress } from '@/components/shop/ShippingAddressForm';
+import OrderConfirmation from '@/components/shop/OrderConfirmation';
 import { useTranslation } from 'react-i18next';
 import { useToast } from '@/hooks/use-toast';
 import { useDrGreenApi } from '@/hooks/useDrGreenApi';
 import { useOrderTracking } from '@/hooks/useOrderTracking';
 import { formatPrice, getCurrencyForCountry } from '@/lib/currency';
 import { supabase } from '@/integrations/supabase/client';
+
 
 // Retry utility with exponential backoff - preserves real error messages
 async function retryOperation<T>(
@@ -102,6 +104,7 @@ const Checkout = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [orderComplete, setOrderComplete] = useState(false);
   const [orderId, setOrderId] = useState<string | null>(null);
+  const [localRowId, setLocalRowId] = useState<string | null>(null);
   const [paymentStatus, setPaymentStatus] = useState<string>('');
   const [isLocalOrder, setIsLocalOrder] = useState(false);
   
@@ -290,7 +293,7 @@ const Checkout = () => {
 
       // Save order locally with complete context snapshot for reliable admin sync
       const clientCountryCode = drGreenClient.country_code || countryCode || 'ZA';
-      await saveOrder({
+      const savedOrder = await saveOrder({
         drgreen_order_id: createdOrderId,
         status: finalStatus,
         payment_status: finalPaymentStatus,
@@ -319,6 +322,7 @@ const Checkout = () => {
       });
 
       setOrderId(createdOrderId);
+      setLocalRowId(savedOrder?.id ?? null);
       setOrderComplete(true);
       clearCart();
 
@@ -353,7 +357,7 @@ const Checkout = () => {
 
         const clientCountryCode = drGreenClient.country_code || countryCode || 'ZA';
 
-        await saveOrder({
+        const savedLocalOrder = await saveOrder({
           drgreen_order_id: localOrderId,
           status: isFullyVerified ? 'MANUAL_REVIEW' : 'PENDING_SYNC',
           payment_status: 'AWAITING_PROCESSING',
@@ -383,6 +387,7 @@ const Checkout = () => {
         });
 
         setOrderId(localOrderId);
+        setLocalRowId(savedLocalOrder?.id ?? null);
         setIsLocalOrder(true);
         setOrderComplete(true);
         clearCart();
@@ -418,84 +423,21 @@ const Checkout = () => {
     }
   };
 
-  if (orderComplete) {
+  if (orderComplete && orderId) {
     return (
-      <div className="min-h-screen bg-background">
+      <>
         <Header />
-        <main className="pt-32 pb-20">
-          <div className="container mx-auto px-4 max-w-2xl">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="text-center"
-            >
-              <Card className="bg-card/50 backdrop-blur-sm border-border/50">
-                <CardContent className="pt-12 pb-8">
-                  {isLocalOrder ? (
-                    <>
-                      <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-amber-500/20 flex items-center justify-center">
-                        <Clock className="w-10 h-10 text-amber-500" />
-                      </div>
-                      <h1 className="text-3xl font-bold text-foreground mb-4">
-                        Order Received!
-                      </h1>
-                      <p className="text-muted-foreground mb-2">
-                        Your order has been received and saved securely.
-                      </p>
-                      <p className="text-xl font-mono text-amber-600 dark:text-amber-400 mb-4">
-                        {orderId}
-                      </p>
-                      <div className="mx-auto max-w-md mb-8 rounded-lg bg-amber-500/10 border border-amber-500/20 p-4 text-left space-y-2">
-                        <div className="flex items-start gap-2">
-                          <Info className="h-4 w-4 text-amber-500 mt-0.5 flex-shrink-0" />
-                          <p className="text-sm text-muted-foreground">
-                            Our team will process your order and confirm via email.
-                          </p>
-                        </div>
-                        <div className="flex items-start gap-2">
-                          <Info className="h-4 w-4 text-amber-500 mt-0.5 flex-shrink-0" />
-                          <p className="text-sm text-muted-foreground">
-                            No payment has been taken yet — you'll receive payment instructions separately.
-                          </p>
-                        </div>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-primary/20 flex items-center justify-center">
-                        <CheckCircle2 className="w-10 h-10 text-primary" />
-                      </div>
-                      <h1 className="text-3xl font-bold text-foreground mb-4">
-                        Order Confirmed!
-                      </h1>
-                      <p className="text-muted-foreground mb-2">
-                        Thank you for your order. Your order ID is:
-                      </p>
-                      <p className="text-xl font-mono text-primary mb-8">
-                        {orderId}
-                      </p>
-                      <p className="text-sm text-muted-foreground mb-8">
-                        You will receive an email confirmation shortly with tracking information.
-                      </p>
-                    </>
-                  )}
-                  <div className="flex flex-col sm:flex-row gap-4 justify-center">
-                    <Button variant="outline" onClick={() => navigate('/shop')}>
-                      Continue Shopping
-                    </Button>
-                    <Button onClick={() => navigate('/orders')}>
-                      View Orders
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            </motion.div>
-          </div>
-        </main>
+        <OrderConfirmation
+          orderId={orderId}
+          localRowId={localRowId}
+          isLocalOrder={isLocalOrder}
+        />
         <Footer />
-      </div>
+      </>
     );
   }
+
+
 
   if (cart.length === 0) {
     return (
