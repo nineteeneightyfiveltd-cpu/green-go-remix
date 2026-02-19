@@ -1,242 +1,196 @@
 
-## Comprehensive Fix: Address Auto-Pull + Order Creation Failure (STATUS 400)
+## Locale-Aware Placeholders + Edit Mode for Saved DApp Address
 
-### What the Images Show
+### Current State (What's Wrong)
 
-**Screenshot 1 (Order Received page):** The order used a LOCAL fallback ID (`LOCAL-20260219-N1QY`) — meaning the Dr. Green API call failed and the system fell through to the local fallback. Status shows `MANUAL_REVIEW / AWAITING_PROCESSING`, which are the fallback-path statuses.
+**Problem 1 — Placeholder data is in `ShippingAddressForm.tsx` but is disconnected from `COUNTRY_REGISTRY`**
 
-**Screenshot 2 (Order Detail page):** Sync Status shows `Sync Failed` with the exact error:
-> `Order creation failed. Please try again or contact support. [ORDER_CREATION_FAILED] (Status 400, Ref: ord_mltr8gcr_3wv0)`
+`src/lib/countries.ts` already has rich per-country data: `postalCodeLabel`, `postalCodePlaceholder`, `postalCodePattern`. But `ShippingAddressForm.tsx` duplicates this into its own local `countryPlaceholders`, `countryLabels`, and `postalCodePatterns` objects that are NOT driven from the registry. If a country is added or updated in `countries.ts`, the form gets stale.
 
-The shipping address on the order is `123 Rivonia Road, Gauteng, Johanesberg, 2148, South Africa` — this is the stale placeholder address from the local DB. A Status 400 from the Dr. Green API almost always means a **validation failure in the payload** sent to `/dapp/carts` or `/dapp/orders`.
+The fix: derive everything from `COUNTRY_REGISTRY` so there is one single source of truth.
 
----
+**Problem 2 — No Edit Mode when address comes from DApp**
 
-### Root Cause Analysis — 4 Confirmed Issues
+When `savedAddress` is populated (from DApp or local DB), the checkout shows the address in a read-only radio card. If the user clicks "Ship to a different address", they get a **blank** `ShippingAddressForm` with `initialAddress={null}`.
 
-**Issue 1 — Checkout still uses local DB as Priority 1 (not fixed yet)**
+But there is no way to **edit the existing verified address in-place** — the user can only replace it with a brand-new one. For a returning patient who just wants to fix a typo in their city, there is no path to do that in the current UI. The correct UX is:
 
-In `src/pages/Checkout.tsx` (lines 178–188), the current code reads:
-```typescript
-// Priority 1: local DB (fast)
-const localShipping = drGreenClient.shipping_address;
-if (localShipping && (localShipping as Record<string, unknown>).address1) {
-  // Returns immediately — DApp API never consulted
-  setIsLoadingAddress(false);
-  return;
-}
-```
+- Saved address card shows the verified address
+- An "Edit address" button/link on that card opens the form **pre-filled** with the existing values
+- On save, the new address replaces the old one and the card updates
+- A visible success banner confirms the change persisted
 
-This means the stale local DB value (`123 Rivonia Road, Gauteng`) is used without ever calling the DApp. The DApp's real verified address (which the second screenshot confirms exists) is never fetched for checkout. This means checkout submits stale/incorrect data to the DApp cart endpoint, which then returns 400.
+**Problem 3 — `ShippingAddressForm` placeholders use generic strings, not locale-aware registry data**
 
-**Issue 2 — `shippings[]` normalization misses the address because DApp returns `shippings[0].address1 = ""`**
-
-The DApp's `shippings[]` response for this client appears to contain `{ country: "South Africa", currency: "ZAR" }` with empty `address1` — but there IS address data on the record (shown in the DApp admin dashboard screenshot from the previous message: `123 Rivonia Road, Sandton`). This means the DApp stores the address in a different field path in the direct client endpoint response. The proxy needs to also check `data.shipping` (singular), not just `data.shippings[]` (array).
-
-**Issue 3 — Step 1 (shipping pre-check) in `create-order` looks at wrong path**
-
-In `drgreen-proxy/index.ts` lines 3046–3056, the pre-check for existing shipping reads:
-```typescript
-const shipping = clientData?.data?.shipping || clientData?.shipping;
-```
-But if the DApp returns `{ data: { shippings: [...] } }` (plural array), it never finds `data.shipping` (singular normalized). The pre-check fails, then the code tries to PATCH the shipping with the stale address, which may fail or overwrite the verified one — causing the 400 on cart add.
-
-**Issue 4 — No success indicator when address form saves**
-
-When a user saves a new address via the `ShippingAddressForm`, the `onSuccess` callback fires immediately after the local toast, before the user sees any visual confirmation. The form unmounts instantly and there's no persistent "Address Saved" confirmation in the checkout page.
+`countryPlaceholders.PT.address1` is `"ex. Rua das Flores, 25"` — hardcoded. The `COUNTRY_REGISTRY` already has `postalCodePlaceholder`, `postalCodeLabel`, and `contactAddress` per country. The form should read postal data from `getCountryConfig(countryCode)` and extend the registry with address-level hints rather than maintaining a parallel data structure.
 
 ---
 
-### The Fix Plan
+### Solution Design
 
-#### File 1: `src/pages/Checkout.tsx`
+#### Part 1 — Drive placeholders from `COUNTRY_REGISTRY` (no parallel maps)
 
-**Change 1 — Flip priority: DApp API first, local DB as true fallback only**
-
-Remove the Priority 1 early-return block that uses local DB:
+Add `addressPlaceholders` to `CountryConfig` in `src/lib/countries.ts`. Each supported country gets a structured hints object:
 
 ```typescript
-// REMOVE THIS BLOCK (lines 178-189):
-// Priority 1: local DB (fast)
-const localShipping = drGreenClient.shipping_address;
-if (localShipping && (localShipping as Record<string, unknown>).address1) {
-  ...
-  return;  // ← This prevents DApp from ever being checked
+interface AddressHints {
+  address1: string;   // "e.g. 45 Main Street"
+  address2: string;   // "e.g. Unit 5B (optional)"
+  city: string;       // "e.g. Cape Town"
+  state: string;      // "e.g. Western Cape"
+  stateLabel: string; // "Province" / "Distrito" / "County"
+  landmark: string;   // "e.g. near the shopping centre"
 }
 ```
 
-Replace with:
+In `ShippingAddressForm.tsx`, replace `countryPlaceholders`, `countryLabels`, and the duplicated `postalCodePatterns` with calls to `getCountryConfig(selectedCountry)`. The field labels (`postalCodeLabel`, `stateLabel`) and format hints (`postalCodePlaceholder`) come directly from the registry:
+
 ```typescript
-// Priority 1: Dr. Green API — always the source of truth
-try {
-  const result = await getClientDetails(drGreenClient.drgreen_client_id);
-  if (!result.error) {
-    const raw = result.data as Record<string, unknown> | null;
-    const shipping = extractShipping(raw);
-    if (shipping?.address1) {
-      const addr = shipping as unknown as ShippingAddress;
-      setSavedAddress(addr);
-      setShippingAddress(addr);
-      setNeedsShippingAddress(false);
-      setAddressMode('saved');
-      setIsLoadingAddress(false);
-      return;
-    }
-    // Partial data - capture country hint
-    const detectedCountry = resolveCountryFromDApp(raw) || drGreenClient.country_code || countryCode || 'ZA';
-    setPartialAddress({ countryCode: detectedCountry });
-  }
-} catch { /* fall through to local DB */ }
-
-// Priority 2: Local DB fallback (offline/error scenario only)
-const localShipping = drGreenClient.shipping_address;
-if (localShipping && (localShipping as Record<string, unknown>).address1) {
-  const addr = localShipping as unknown as ShippingAddress;
-  setSavedAddress(addr);
-  setShippingAddress(addr);
-  setNeedsShippingAddress(false);
-  setAddressMode('saved');
-  setIsLoadingAddress(false);
-  return;
-}
-
-// Priority 3: No address found — prompt user
-setNeedsShippingAddress(true);
-setIsLoadingAddress(false);
+const cfg = getCountryConfig(selectedCountry);
+// Postal code label: cfg.postalCodeLabel
+// Postal code placeholder: cfg.postalCodePlaceholder
+// Postal code regex pattern: cfg.postalCodePattern (already a string — compile to RegExp)
+// Address placeholder: cfg.addressHints.address1
 ```
 
-**Change 2 — Add "Address Saved" success banner after manual save**
+This eliminates all duplicate data and makes adding a new country a single-file change in `countries.ts`.
 
-In `handleShippingAddressSaved`, set `setAddressManuallySaved(true)`. Then in the JSX, after the address selection card, render:
+#### Part 2 — Edit Mode for Saved Address
+
+**`src/components/shop/ShippingAddressForm.tsx` changes:**
+
+Add `mode` prop: `'new' | 'edit'` (defaults to `'new'`).
+
+- `mode='new'`: current behavior — form starts with empty fields and generic placeholder hints.
+- `mode='edit'`: form is pre-filled with `initialAddress` values. Header says "Edit Address". Submit button says "Update Address". On success, the `onSuccess` callback is called with the updated data, and the parent replaces the displayed address.
+
+Add internal `isEditing` state toggled by an "Edit" button shown in the card header when `mode='edit'` and `initialAddress` is provided. Initially collapsed (shows a summary); expands inline on click.
+
+**`src/pages/Checkout.tsx` changes:**
+
+In the "Delivery Address" card, change the saved address radio option to include an "Edit" button:
+
 ```tsx
-{addressManuallySaved && (
-  <Alert className="bg-green-500/10 border-green-500/30 text-green-700 dark:text-green-400">
-    <Check className="h-4 w-4" />
-    <AlertTitle>Address Saved</AlertTitle>
-    <AlertDescription>Your delivery address has been confirmed.</AlertDescription>
-  </Alert>
+<div className="flex items-start gap-3 p-4 rounded-lg border ...">
+  <RadioGroupItem value="saved" id="addr-saved" className="mt-1" />
+  <Label htmlFor="addr-saved" className="flex-1 cursor-pointer">
+    <div className="flex items-center justify-between">
+      <span className="flex items-center gap-2 font-medium">
+        <Home className="h-4 w-4" /> Use saved address
+      </span>
+      <Button variant="ghost" size="sm" onClick={() => setIsEditingAddress(true)}>
+        <Pencil className="h-3.5 w-3.5 mr-1" /> Edit
+      </Button>
+    </div>
+    <div className="text-sm text-muted-foreground mt-1">
+      {savedAddress.address1}<br />
+      {savedAddress.city}, {savedAddress.postalCode}<br />
+      {savedAddress.country}
+    </div>
+  </Label>
+</div>
+
+{isEditingAddress && (
+  <div className="pt-4 border-t border-border/50">
+    <ShippingAddressForm
+      clientId={drGreenClient.drgreen_client_id}
+      initialAddress={savedAddress}   // pre-filled with real verified data
+      defaultCountry={...}
+      onSuccess={handleShippingAddressSaved}  // replaces savedAddress on save
+      onCancel={() => setIsEditingAddress(false)}
+      submitLabel="Update Address"
+      variant="inline"
+    />
+  </div>
 )}
 ```
 
-Import `Check` from `lucide-react` (already available in the bundle).
-
-#### File 2: `supabase/functions/drgreen-proxy/index.ts`
-
-**Change 1 — Fix `get-my-details`: Only merge local DB if DApp has NO shipping data at all**
-
-At line 2511–2517, the current code merges local DB shipping if `!innerData.shipping`. This fires even when `innerData.shipping` exists but has `address1: ""`. The problem is the proxy normalizes `shippings[]` into `shipping{}` — but if `shippings[0].address1` is empty, the resulting `shipping.address1` is empty, so the merge guard fires and overwrites with local DB stale data.
-
-Change to:
-
-```typescript
-// Current (wrong): merges local if !shipping object
-if (!innerData.shipping && localClient?.shipping_address) { ... }
-
-// Fixed: only merge if DApp returned zero address data at all
-const dappHasAddress = !!(innerData.shipping as any)?.address1 ||
-  (Array.isArray(innerData.shippings) && innerData.shippings.some((s: any) => s?.address1));
-if (!dappHasAddress && localClient?.shipping_address?.address1) {
-  innerData.shipping = normalizeShippingObject(localClient.shipping_address as Record<string, unknown>);
-  logInfo("Merged local DB shipping into API response (no DApp address found)", { clientId });
-}
-```
-
-**Change 2 — Fix `create-order` Step 1 pre-check: also inspect `shippings[]`**
-
-At lines 3046–3056, the pre-check only looks at `data.shipping` (singular). Add a check for `data.shippings[]`:
-
-```typescript
-const clientData = await clientCheckResponse.clone().json();
-const innerClientData = clientData?.data || clientData;
-
-// Check both singular 'shipping' and plural 'shippings[]'
-const singularShipping = innerClientData?.shipping;
-const pluralShipping = Array.isArray(innerClientData?.shippings)
-  ? innerClientData.shippings.find((s: any) => s?.address1)
-  : null;
-const shipping = singularShipping?.address1 ? singularShipping : pluralShipping;
-
-if (shipping?.address1) {
-  logInfo(`[${requestId}] Step 1: Client already has shipping address on API, skipping PATCH`, {
-    city: shipping.city,
-  });
-  existingShipping = true;
-  shippingVerified = true;
-}
-```
-
-**Change 3 — Fix `create-order` Step 1: Never skip PATCH even if existingShipping is true (let API decide)**
-
-The current code completely skips the shipping PATCH if `existingShipping = true`. But if the local DB has stale data that doesn't match the DApp, the cart add will still fail with 400. The safest behavior is: always PATCH the shipping with the address the user confirmed in this session, regardless of what the DApp has. Change the guard from:
-
-```typescript
-if (!existingShipping) {
-  // PATCH shipping
-}
-```
-
-To:
-
-```typescript
-// Always update shipping if provided — API is source of truth
-// Sending the same address again is idempotent and ensures consistency
-```
-
-This means removing the `existingShipping` skip so the PATCH always runs when `shippingAddress` is provided. If the PATCH returns 200, `shippingVerified = true`.
-
-**Change 4 — Add `logError` for Step 2 cart 400 error body**
-
-Currently when the cart POST returns 400, the error body is truncated to 200 chars in the log. Increase this to 500 chars so we can see the actual Dr. Green validation message:
-
-```typescript
-error: lastCartError.slice(0, 500),  // was 200
-```
-
-#### File 3: `src/components/shop/ShippingAddressForm.tsx`
-
-**Change 1 — Add 1200ms delay before `onSuccess` so the "saved" state is visible**
-
-Currently `onSuccess?.(shippingData)` is called immediately at line 274, which causes the parent to unmount the form before the user sees "Address Confirmed":
-
-```typescript
-setSaveSuccess(true);
-toast({ title: 'Address Confirmed', ... });
-// Pause briefly so user sees the checkmark before form disappears
-await new Promise(resolve => setTimeout(resolve, 1200));
-onSuccess?.(shippingData);
-```
-
-This requires `handleSubmit` to be `async` (it already is, since it uses `await` internally).
-
-**Change 2 — When `initialAddress` is populated, show "Edit" toggle instead of full blank form**
-
-When the saved address is passed as `initialAddress` (from the DApp), the form currently renders all blank fields with generic placeholders. Instead, show an "Edit address" button that expands the form pre-filled with the existing values. This makes it clear what address is on file and what the user is changing.
+When `handleShippingAddressSaved` fires with the updated address:
+- `setSavedAddress(updatedAddress)` — card immediately shows new values
+- `setShippingAddress(updatedAddress)` — order will use new address
+- `setIsEditingAddress(false)` — collapse the edit form
+- `setAddressManuallySaved(true)` — suppress re-fetch from DApp
+- Green "Address Updated" banner appears for 3 seconds then auto-dismisses
 
 ---
 
-### Summary of Files to Edit
+### Files to Edit
 
-| File | Changes |
+| File | What Changes |
 |---|---|
-| `src/pages/Checkout.tsx` | Flip priority: DApp first, local DB second; add "Address Saved" green banner after manual save |
-| `supabase/functions/drgreen-proxy/index.ts` | Fix `get-my-details` local DB merge guard; fix `create-order` Step 1 pre-check to include `shippings[]`; always run shipping PATCH; increase error body logging |
-| `src/components/shop/ShippingAddressForm.tsx` | Add 1200ms delay before `onSuccess` so confirmation is visible |
+| `src/lib/countries.ts` | Add `addressHints` field to `CountryConfig` interface and fill in values for PT, GB, ZA, TH. Keep existing fields untouched. |
+| `src/components/shop/ShippingAddressForm.tsx` | (1) Remove `countryPlaceholders`, `countryLabels`, `postalCodePatterns` local maps. (2) Derive all labels/hints from `getCountryConfig`. (3) The postal regex is already a string in registry — compile with `new RegExp(cfg.postalCodePattern, 'i')`. (4) No `mode` prop needed — the `isEditing` logic stays in Checkout. |
+| `src/pages/Checkout.tsx` | (1) Add `isEditingAddress` state. (2) Add "Edit" button + inline edit form in the saved address card. (3) `handleShippingAddressSaved` updates `savedAddress` and collapses edit mode. (4) Import `Pencil` from lucide-react. |
 
-### Expected Behavior After Fix
+---
+
+### Locale-Aware Address Hints (data to add to `countries.ts`)
+
+```text
+PT (Portugal)
+  address1:   "ex. Rua das Flores, 25"
+  address2:   "ex. Andar 3, Fração B"
+  city:       "ex. Lisboa"
+  state:      "ex. Setúbal"
+  stateLabel: "Distrito"
+  landmark:   "ex. perto da Estação do Oriente"
+
+GB (United Kingdom)
+  address1:   "e.g. 12 High Street"
+  address2:   "e.g. Flat 2A"
+  city:       "e.g. London"
+  state:      "e.g. Surrey"
+  stateLabel: "County"
+  landmark:   "e.g. near the post office"
+
+ZA (South Africa)
+  address1:   "e.g. 45 Main Road"
+  address2:   "e.g. Unit 5B"
+  city:       "e.g. Cape Town"
+  state:      "e.g. Western Cape"
+  stateLabel: "Province"
+  landmark:   "e.g. near the shopping centre"
+
+TH (Thailand)
+  address1:   "e.g. 88 Charoen Krung Rd"
+  address2:   "e.g. Room 4B"
+  city:       "e.g. Bangkok"
+  state:      "e.g. Chiang Rai"
+  stateLabel: "Changwat (Province)"
+  landmark:   "e.g. near BTS station"
+```
+
+---
+
+### Edit Flow UX (Step by Step)
 
 ```text
 User visits /checkout
-  → DApp called first (Priority 1 — source of truth)
-  → DApp returns verified address: "123 Rivonia Road, Sandton, 2148, ZAF"
-  → Checkout shows: "Delivery Address — 123 Rivonia Road, Sandton"
-  → User clicks "Place Order"
-  → create-order: PATCH shipping with confirmed address (always runs)
-  → Cart items added successfully (shipping verified on client record)
-  → POST /dapp/orders returns real orderId
-  → Order saved with real DApp ID (not LOCAL- prefix)
-  → Sync Status: synced (not failed)
+  → DApp returns full address: "123 Rivonia Road, Sandton, 2148, ZAF"
+  → Checkout shows "Use saved address" card with address details
+  → User sees "Edit" button on the card
+
+User clicks "Edit"
+  → isEditingAddress = true
+  → Inline ShippingAddressForm expands BELOW the address card
+  → Form is pre-filled: address1="123 Rivonia Road", city="Sandton", postalCode="2148", country=ZA
+  → Placeholders are locale-aware ZA hints (shown in empty fields only, e.g. address2)
+  → User changes city from "Sandton" to "Sandton City"
+  → Clicks "Update Address"
+
+On save:
+  → Form shows "Saving..." spinner
+  → Address PATCHed to DApp API + saved to local DB
+  → 1200ms delay so user sees "Saved!" tick
+  → onSuccess fires with new address
+  → savedAddress card updates immediately to: "123 Rivonia Road, Sandton City, 2148"
+  → Edit form collapses
+  → Green "Address Updated" banner appears
+  → shippingAddress updated — Place Order will use new address
 ```
 
-### Handling the Stale Local DB Record
+### No Changes Needed In
 
-After the DApp is used as Priority 1, the local DB stale address (`123 Rivonia Road, Gauteng`) becomes irrelevant because it is only used as a fallback when the DApp API is unreachable. No SQL cleanup is required — the fix is behavioral.
+- `supabase/functions/drgreen-proxy/index.ts` — address PATCH logic already correct from previous fix
+- `src/hooks/useDrGreenApi.ts` — `updateShippingAddress` already works
+- Any i18n files — placeholders are in code, not translation files (they are format examples, not translated strings)
