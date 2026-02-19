@@ -3161,10 +3161,11 @@ serve(async (req) => {
         }
         
         // Step 1.5: Clear any stale cart to prevent 409 conflicts
-        // Correct endpoint: DELETE /dapp/carts/{clientId} (NOT /dapp/carts/client/{clientId})
+        // Correct endpoint: DELETE /dapp/carts/client/{clientId} — wipes ENTIRE cart for a client
+        // (NOT /dapp/carts/{cartItemId} which only deletes a single cart item by its UUID)
         logInfo(`[${requestId}] Step 1.5: Clearing existing cart to prevent 409 conflict`);
         try {
-          const emptyCartResponse = await drGreenRequest(`/dapp/carts/${clientId}`, "DELETE", undefined, adminEnvConfig);
+          const emptyCartResponse = await drGreenRequest(`/dapp/carts/client/${clientId}`, "DELETE", undefined, adminEnvConfig);
           logInfo(`[${requestId}] Step 1.5: Cart clear result`, { status: emptyCartResponse.status });
           if (emptyCartResponse.status === 404) {
             logInfo(`[${requestId}] Step 1.5: No existing cart found (404), proceeding`);
@@ -3172,7 +3173,7 @@ serve(async (req) => {
         } catch (clearErr) {
           logWarn(`[${requestId}] Step 1.5: Cart clear failed (non-blocking)`, { error: String(clearErr).slice(0, 100) });
         }
-        await sleep(500);
+        await sleep(1000); // Increased from 500ms — give API time to process cart deletion
         
         // Step 2: Add items to server-side cart INDIVIDUALLY
         // API: POST /dapp/carts with { clientId, strainId, quantity } per item
@@ -3225,7 +3226,7 @@ serve(async (req) => {
                 if (lastCartStatus === 409 && cartAttempts < maxCartAttempts) {
                   logInfo(`[${requestId}] Step 2: 409 conflict on item ${i + 1} - clearing cart and retrying all`);
                   try {
-                    await drGreenRequest(`/dapp/carts/${clientId}`, "DELETE", undefined, adminEnvConfig);
+                    await drGreenRequest(`/dapp/carts/client/${clientId}`, "DELETE", undefined, adminEnvConfig);
                   } catch (clearErr) {
                     logWarn(`[${requestId}] Step 2: Cart clear failed`, { error: String(clearErr).slice(0, 100) });
                   }
@@ -3344,9 +3345,9 @@ serve(async (req) => {
             previousStep: stepFailed,
           });
           
-          // Clear cart completely
+          // Clear cart completely — use correct endpoint: DELETE /dapp/carts/client/{clientId}
           try {
-            await drGreenRequest(`/dapp/carts/${clientId}`, "DELETE", undefined, adminEnvConfig);
+            await drGreenRequest(`/dapp/carts/client/${clientId}`, "DELETE", undefined, adminEnvConfig);
           } catch (clearErr) {
             logWarn(`[${requestId}] Fallback: Cart clear failed`, { error: String(clearErr).slice(0, 100) });
           }
