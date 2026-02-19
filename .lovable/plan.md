@@ -1,117 +1,126 @@
 
+# Checkout Endpoint Fixes — Combined Implementation Plan
 
-## Full Test Report + Action Plan: varseainc@gmail.com Checkout
+## What the Audit Found
 
-### Current State — What the Data Shows
+### Issue 1 — `orderId` is never extracted from the Dr. Green response (CRITICAL)
 
-The patient is fully eligible:
-- `is_kyc_verified: true`
-- `admin_approval: VERIFIED`
-- `drgreen_client_id: a4357132-7e8c-4c8a-b005-6f818b3f173e`
-- Country: ZA (maps to ZAF)
+**Where:** `supabase/functions/drgreen-proxy/index.ts`, lines 3272 and 3355
 
-Shipping address is stored locally:
-```
-123 Rivonia Road, Sandton, Sandton, South Africa, ZA, 2148
+**What happens:** When the order creation succeeds (`response.ok` is true), the code executes `break`, which exits the switch and falls to the generic bottom handler at line 4801. That handler calls `response.json()` and returns the raw Dr. Green JSON unchanged. The Dr. Green API response shape is:
+
+```json
+{ "data": { "id": "real-uuid", "status": "PENDING", ... } }
 ```
 
-All 6 historical orders are `LOCAL-*` fallbacks — no real Dr. Green order ID was ever returned.
-
-### Root Cause Analysis — Why Orders Are Still Failing
-
-The 409 errors (stale cart) are now fixed by the cart clear path correction. But there is a second, separate problem causing the **Status 400** errors which appeared AFTER the 409s stopped.
-
-Looking at the most recent order (`ord_mlq157ea_2zmc` — Status 400), the shipping address stored locally uses:
-
-```
-countryCode: "ZA"  (Alpha-2)
-```
-
-But the Dr. Green API for shipping updates and cart operations requires:
-
-```
-countryCode: "ZAF"  (Alpha-3)
-```
-
-This is confirmed by the successful strain sync which uses `ZAF` and the order records themselves — the two most recent orders show `countryCode: ZAF` in `drgreen_orders.shipping_address` but the client record in `drgreen_clients` still has `countryCode: ZA` (Alpha-2). The proxy's shipping update step sends the raw stored value to the Dr. Green API, which rejects it with 400 because it does not recognise `ZA` as a valid `countryCode`.
-
-There is also a second issue: the `country_code` column on `drgreen_clients` is stored as `ZA` but the Dr. Green API's client shipping update endpoint expects `ZAF`. The proxy must normalise this before sending.
-
-### The Three Fixes Required
-
-#### Fix 1 — Normalise Alpha-2 to Alpha-3 before shipping update (drgreen-proxy)
-
-In the `create-order` Step 1 (shipping update), the proxy reads `addr.countryCode` from the stored shipping address. When that value is `ZA` (Alpha-2), it must be converted to `ZAF` (Alpha-3) before the API call.
-
-The proxy already has a `toAlpha3` helper function. It just needs to be applied at the point where the shipping payload is constructed for the Dr. Green API call.
-
-**File: `supabase/functions/drgreen-proxy/index.ts`**
-
-In the Step 1 shipping update block (around line 3060–3105), wrap the `countryCode` field:
+But `Checkout.tsx` line 277 checks:
 ```typescript
-// BEFORE (sends raw value that may be Alpha-2):
-countryCode: addr.countryCode || '',
-
-// AFTER (always sends Alpha-3):
-countryCode: toAlpha3(addr.countryCode) || toAlpha3(addr.country) || 'ZAF',
+orderResult.data?.orderId  // → undefined (raw response has no top-level orderId)
 ```
 
-#### Fix 2 — Normalise Alpha-2 to Alpha-3 in the client record (drgreen_clients table)
+Since `orderId` is always `undefined`, the condition `if (orderResult.error || !orderResult.data?.orderId)` always throws `"Failed to create order"`, even when Dr. Green actually created the order successfully. This is why every order has a `LOCAL-*` ID despite the API call completing.
 
-The `drgreen_clients` record for this patient has `country_code: ZA`. This should be `ZAF` to be consistent with the API. Fix the stored value via a targeted update:
+**Fix:** Replace `break` at lines 3272 and 3355 with an explicit `return new Response(...)` that extracts `orderId` from the Dr. Green response before sending it to the frontend:
 
-```sql
-UPDATE drgreen_clients 
-SET country_code = 'ZAF', updated_at = now()
-WHERE email = 'varseainc@gmail.com' 
-  AND country_code = 'ZA';
-```
-
-Also fix any other ZA entries that are Alpha-2:
-```sql
-UPDATE drgreen_clients 
-SET country_code = 'ZAF', updated_at = now()
-WHERE country_code = 'ZA';
-```
-
-#### Fix 3 — Normalise in the ShopContext / checkout flow (frontend)
-
-The `ShopContext` passes the country code from `drgreen_clients.country_code` into the checkout payload. If it is stored as `ZA`, the frontend also sends `ZA` to the proxy in `orderData.shippingAddress.countryCode`. The proxy should normalise ALL incoming country codes from the frontend before constructing any API payload.
-
-**File: `supabase/functions/drgreen-proxy/index.ts`**
-
-In the `create-order` action, when extracting the shipping address from `orderData`, normalise `countryCode`:
 ```typescript
-const countryCode = toAlpha3(orderData.shippingAddress?.countryCode || addr.countryCode || '');
+// Extract orderId from Dr. Green's nested response
+const rawOrderData = await response.clone().json();
+const orderId = 
+  rawOrderData?.data?.id || 
+  rawOrderData?.data?.orderId || 
+  rawOrderData?.orderId || 
+  rawOrderData?.id || 
+  null;
+
+return new Response(JSON.stringify({
+  success: true,
+  orderId,
+  status: rawOrderData?.data?.status || 'PENDING',
+  totalAmount: rawOrderData?.data?.totalAmount || rawOrderData?.data?.total || 0,
+  createdAt: rawOrderData?.data?.createdAt || new Date().toISOString(),
+  requestId,
+}), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 });
 ```
 
-### Why the `LOCAL-20260217-6OF4` Order Has No `sync_error`
+This applies at **both** success exit points (main path line 3272 and fallback path line 3355).
 
-One order has no error recorded but still has a LOCAL fallback ID. This is because the Dr. Green API returned a successful response for the cart/order step but the response parsing failed to extract the real order ID — likely because the response shape at that time was different. This order was not actually placed on the Dr. Green side and is safe to ignore.
+---
 
-### Live Test Plan (After Fixes Applied)
+### Issue 2 — `create-payment` and `get-payment` always fail (CRITICAL)
 
-These steps confirm the fix works:
+**Where:** `supabase/functions/drgreen-proxy/index.ts` lines 3468–3479; `src/pages/Checkout.tsx` lines 284–325
 
-1. Apply the two code fixes and the DB migration (above).
-2. Deploy the updated proxy.
-3. Log in as varseainc@gmail.com on the shop.
-4. Add "Candy Pave" (strainId: `25c9bdc7-0e4e-4572-b089-37b2ca60e965`) to cart.
-5. Proceed through checkout.
-6. Watch edge function logs for:
-   - Step 1: Shipping update returns `200` (not 400)
-   - Step 1.5: Cart clear returns `200` or `404` (not an error)
-   - Step 2: Cart add returns `201`
-   - Step 3: Order creation returns `201` with a real `orderId` (not LOCAL-)
-7. Check `drgreen_orders` table — the new row should have a real `drgreen_order_id` (not `LOCAL-*`) and `status: PENDING`.
+**What happens:** After order creation, the checkout immediately calls `createPayment()` which sends `POST /dapp/payments` to the Dr. Green API. This endpoint is not in the Dr. Green API. It returns a 404 or 405 — causing `paymentResult.error` to be set, which throws `"Failed to initiate payment"` and triggers the `LOCAL-*` fallback.
 
-### Summary of Changes
+Even if the payment call somehow passed, there is a polling loop (lines 305–325) that waits up to 15 seconds checking `/dapp/payments/{id}` — another non-existent endpoint.
+
+**Fix:** Remove `createPayment` and `getPayment` from `Checkout.tsx`. After order creation returns a real `orderId`, complete the checkout immediately:
+- Save the order locally with `status: 'PENDING'` and `payment_status: 'AWAITING_PAYMENT'`
+- Clear the cart
+- Show the order confirmation
+
+Payment confirmation will arrive via webhook (`drgreen-webhook` edge function already handles this) or via admin action in the Dr. Green portal.
+
+---
+
+## Files to Change
 
 | # | File | Change |
 |---|------|--------|
-| 1 | `supabase/functions/drgreen-proxy/index.ts` | Apply `toAlpha3()` to `countryCode` in shipping update payload construction (Step 1 of create-order) |
-| 2 | `supabase/functions/drgreen-proxy/index.ts` | Apply `toAlpha3()` to incoming `orderData.shippingAddress.countryCode` at start of create-order |
-| 3 | Database migration | `UPDATE drgreen_clients SET country_code = 'ZAF' WHERE country_code = 'ZA'` |
+| 1 | `supabase/functions/drgreen-proxy/index.ts` | Replace `break` at line 3272 with explicit `return new Response(...)` that extracts `orderId` |
+| 2 | `supabase/functions/drgreen-proxy/index.ts` | Replace `break` at line 3355 with the same explicit `return new Response(...)` |
+| 3 | `src/pages/Checkout.tsx` | Remove `createPayment` / `getPayment` polling block (lines 284–325); complete checkout at order creation |
 
-The edge function will be redeployed automatically after code changes. The DB migration will run immediately after approval.
+---
 
+## Technical Details
+
+### What the proxy returns today vs what it should return
+
+**Today (broken):**
+```
+Dr. Green API response → break → generic bottom handler → returns raw JSON as-is
+{ "data": { "id": "real-uuid", "status": "PENDING" } }
+```
+
+**After fix:**
+```
+Dr. Green API response → normalised return directly from case block
+{ "success": true, "orderId": "real-uuid", "status": "PENDING", ... }
+```
+
+### Checkout flow after fix
+
+```text
+handlePlaceOrder()
+  → createOrder() via proxy   ← 3-step atomic: shipping + cart + order
+      → returns { success: true, orderId: "real-uuid" }
+  → saveOrder() locally       ← status: PENDING, payment_status: AWAITING_PAYMENT
+  → clearCart()
+  → setOrderComplete(true)    ← confirmation screen shown
+  → sendOrderConfirmationEmail() (fire-and-forget)
+```
+
+No payment polling. No blocking. Order confirmed immediately when Dr. Green returns success.
+
+---
+
+## What Stays the Same
+
+- The 3-step atomic order flow (shipping PATCH → cart add → order POST) is correct and stays unchanged
+- The `LOCAL-*` fallback logic remains for genuine failures (network errors, 500s)
+- The `retryOperation` wrapper stays — it handles transient errors gracefully
+- The `useShopSafe` fix in Header stays (already applied, no change needed)
+- The `toAlpha3()` normalisation in the shipping payload stays (already applied, no change needed)
+
+---
+
+## Expected Outcome After Fix
+
+1. `create-order` succeeds → proxy returns `{ success: true, orderId: "real-uuid" }`
+2. `Checkout.tsx` reads `orderResult.data.orderId` → it is now set → no `"Failed to create order"` exception
+3. Order is saved to `drgreen_orders` with the real `drgreen_order_id` (not `LOCAL-*`)
+4. User sees "Order Submitted" confirmation immediately
+5. `drgreen_orders` table will show real Dr. Green order IDs for all new orders
+
+The edge function is redeployed automatically after the proxy change.
