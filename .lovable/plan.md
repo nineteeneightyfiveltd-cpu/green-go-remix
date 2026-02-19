@@ -1,52 +1,43 @@
 
+## Debug Logs for Shippings + Dynamic Country Placeholders
 
-## Fix: Shipping Address Pre-Population and Country-Relevant Placeholders
+### What's Already Done
+- `countryPlaceholders` map exists in `ShippingAddressForm.tsx` for PT, ZA, GB, TH
+- `getPlaceholder(selectedCountry, field)` helper is already used in all Input elements
+- The form watches `country` via `form.watch('country')`
 
-### Problem 1: Shipping Address Not Pulled from DApp
+### What's Missing
 
-The `sync-clients` edge function has two bugs preventing full address data from syncing:
+#### 1. Debug Logs in `sync-clients` Edge Function
 
-**Bug A -- Strict `address1` guard (line ~284):** The code `dappShipping?.address1 ? {...} : null` only builds a shipping object when `address1` is truthy. If the DApp API returns the street under a slightly different key, or if there is partial data (city, country but no street yet), it skips the entire object. The guard should be relaxed: build the object if *any* shipping entry exists.
+No `console.log` for raw shipping data exists yet. Add structured logging immediately after the DApp client list is received, outputting the raw `client.shippings` array for each client being processed. This is the only way to verify what field names the DApp API actually returns.
 
-**Bug B -- Update condition too narrow (line ~300):** `needsShippingUpdate = shippingAddress && !existing.shipping_address` evaluates to `false` when a partial record already exists in the DB (e.g. `{country: "South Africa", address2: "", state: ""}`). It should check whether the local record is missing `address1` specifically, and overwrite if the DApp has a richer version.
+Log format (per client):
+```
+[sync-clients] Client shipping raw data { email, shippings: [...] }
+```
 
-Additionally, debug logging will be added to capture the raw `client.shippings` array from the API so we can confirm the exact field names returned.
+#### 2. Dynamic Validation Schema on Country Change
 
-### Problem 2: Hardcoded Placeholders Not Country-Relevant
+The form schema is created once on mount using `initialCountry` and never updates. When the user picks a different country in the dropdown, the postal code regex stays locked to the original country. Fix: use `useEffect` watching `selectedCountry` to call `form.trigger('postalCode')` so the live field value is re-validated against the correct pattern immediately.
 
-The `ShippingAddressForm` currently shows generic placeholders like "123 Main Street", "Lisbon", "Apt 4B" regardless of which country is selected. These should change dynamically based on the country dropdown selection.
+Also add a `key` or call `form.clearErrors('postalCode')` when country switches to avoid stale error messages.
 
-### Changes
+#### 3. Dynamic Field Labels Per Country
 
-#### 1. `supabase/functions/sync-clients/index.ts`
+Currently all labels are hardcoded strings regardless of country:
+- "State / Province" — should be "County" for GB, "Province" for ZA, "Distrito" for PT, "Changwat" for TH
+- "Postal Code" — should be "Post Code" for GB, "Código Postal" for PT
 
-- Relax the `address1` guard: build `shippingAddress` object whenever `dappShipping` exists (not only when `address1` is present)
-- Fix the update condition: update if local `shipping_address` is null OR if its `address1` is empty/missing while the DApp has a non-empty `address1`
-- Add field name fallbacks (`addressLine1`, `zipCode`, etc.) for robustness
-- Add `console.log` for first 3 clients to dump raw `shippings` array for debugging
-- Deploy and re-sync
+Add a `countryLabels` map alongside `countryPlaceholders` and bind all form labels to `selectedCountry`.
 
-#### 2. `src/components/shop/ShippingAddressForm.tsx`
+#### 4. Re-run Sync After Deploy
 
-Add a country-specific placeholder map that updates dynamically when the country dropdown changes:
+After deploying `sync-clients` with debug logs, trigger a manual re-sync from the Admin Strains Sync page so the logs appear in the edge function console. This will confirm the exact DApp field names for `shippings`.
 
-| Field | PT (Portugal) | ZA (South Africa) | GB (United Kingdom) | TH (Thailand) |
-|---|---|---|---|---|
-| Street Address | Rua Augusta 100 | 123 Rivonia Road | 10 Downing Street | 123 Sukhumvit Road |
-| Apartment | Andar 3 | Unit 5B | Flat 2A | Room 4B |
-| City | Lisbon | Johannesburg | London | Bangkok |
-| State/Province | Lisboa | Gauteng | England | Krung Thep |
-| Postal Code | 1000-001 | 2196 | SW1A 1AA | 10110 |
-| Landmark | Perto da Praca | Near Sandton City | Near Westminster | Near BTS Asok |
-
-The postal code placeholder already adapts via `postalCodePatterns[selectedCountry]?.example`. The remaining fields (street, city, state, apartment, landmark) will use the same `selectedCountry` watch value.
-
-### Technical Details
-
-**Files to edit:**
+### Files to Edit
 
 | File | Change |
 |---|---|
-| `supabase/functions/sync-clients/index.ts` | Fix address guard, fix update condition, add debug logging, add field fallbacks |
-| `src/components/shop/ShippingAddressForm.tsx` | Add country-specific placeholder map, update all Input placeholders to be dynamic |
-
+| `supabase/functions/sync-clients/index.ts` | Add `console.log` for raw `client.shippings` data per client |
+| `src/components/shop/ShippingAddressForm.tsx` | Add `countryLabels` map, bind labels to `selectedCountry`, add `useEffect` to re-validate postal code on country change |
