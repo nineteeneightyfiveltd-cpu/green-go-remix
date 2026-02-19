@@ -1,63 +1,52 @@
 
-# Create Admin Account — `healingbudsglobal@gmail.com`
+## Fix: Provision Auth Accounts for All Synced Clients
 
-## Current State
+### The Problem
 
-The database has no users at all — `auth.users` is empty. The account for `healingbudsglobal@gmail.com` does not exist yet, so login will fail with "Invalid login credentials" (which matches the auth logs you saw).
+9 clients were synced from the Dr. Green API into `public.drgreen_clients` but have no corresponding login accounts (`user_id = null`). Without an auth account, those clients cannot log in. The `admin-update-user` edge function already exists and is capable of creating auth users using the Service Role Key.
 
-## What Needs to Happen
+### What Will Be Done
 
-1. **Create the user account** via the `admin-update-user` edge function with:
-   - Email: `healingbudsglobal@gmail.com`
-   - Password: `12345678`
-   - Email confirmed: `true` (so login works immediately — no verification email needed)
+#### 1. Create a new `admin-provision-users` edge function
 
-2. **Admin role assignment** — Already handled automatically. The `auto_assign_admin_role` database trigger fires whenever a new row is inserted into `auth.users`. It checks the email and inserts a row into `public.user_roles` with `role = 'admin'` for both:
-   - `scott@healingbuds.global`
-   - `healingbudsglobal@gmail.com`
+A dedicated Supabase Edge Function that:
 
-   No manual role assignment needed — it happens in the same transaction as account creation.
+- Fetches all `drgreen_clients` records where `user_id IS NULL`
+- For each, calls the Supabase Admin API to create an auth user with:
+  - Their email from `drgreen_clients`
+  - Password: `12345678`
+  - Email pre-confirmed (`email_confirm: true`)
+- After creating the auth user:
+  - Updates `drgreen_clients.user_id` to link the record
+  - Inserts a `profiles` row with their full name
+  - If the email is `scott@healingbuds.global` or `healingbudsglobal@gmail.com`, inserts an admin role into `user_roles`
+- Returns a detailed summary: created / skipped (already exists) / failed
+- Uses the built-in `SUPABASE_SERVICE_ROLE_KEY` (already available)
 
-3. **Verify the account** by calling `admin-update-user` with `verify: true` so that `email_confirmed_at` is set and the user can log in immediately without needing an inbox.
+#### 2. Add a "Provision All Users" button to the Admin Clients page
 
-## Flow
+In `src/pages/AdminClients.tsx`, add a prominent button that:
 
-```text
-Call admin-update-user edge function
-  → createUser(email, password, email_confirm: true)
-      → auth.users row created
-          → auto_assign_admin_role trigger fires
-              → INSERT INTO user_roles (user_id, 'admin')
-```
+- Calls the new `admin-provision-users` edge function
+- Shows a loading state during provisioning
+- Displays the result (e.g. "9 accounts created, 0 skipped, 0 failed") as a toast
 
-After this, visiting `/auth` and logging in with `healingbudsglobal@gmail.com` / `12345678` will:
-- Authenticate successfully
-- `useUserRole` hook will detect `isAdmin = true`
-- Auth page `useEffect` will redirect to `/admin`
+#### 3. Update `sync-clients` to auto-provision on future syncs
 
-## Technical Details
+Inside `supabase/functions/sync-clients/index.ts`, after inserting a new unlinked client (where no auth user was found by email), automatically attempt to create the auth account in the same pass. This prevents the gap from recurring on future syncs.
 
-The `admin-update-user` edge function at `supabase/functions/admin-update-user/index.ts` already supports:
-- `action: 'create'` path: if user not found → `createUser()` with `email_confirm: true`
-- Update path: if user exists → `updateUserById()` to set password + confirm email
+### Technical Notes
 
-The function uses `SUPABASE_SERVICE_ROLE_KEY` (already configured as a secret) so it can bypass email confirmation requirements and create accounts directly.
+- Uses `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` — both already set as built-in secrets
+- No database migrations required — existing `drgreen_clients`, `profiles`, and `user_roles` tables are sufficient
+- The `auto_link_drgreen_client` trigger is bypassed intentionally here since we are linking in the same operation
+- Clients provisioned: `varseainc@gmail.com`, `maykendaal23@gmail.com`, `scott.k1@outlook.com`, `kayliegh.sm@gmail.com`, `scott@healingbuds.global`, `testhb@yopmail.com`, `test9876@yopmail.com`, `wwe2xjhickei@drewzen.com`, `testflow3@healingbuds.test`
+- `scott@healingbuds.global` and `healingbudsglobal@gmail.com` will be assigned admin roles
 
-## Files to Change
+### Files to Create/Edit
 
-| # | File | Change |
-|---|------|--------|
-| 1 | `supabase/functions/admin-update-user/index.ts` | No change needed — function already handles create-or-update with `verify: true` |
-
-The only action is **calling the edge function** with the correct payload. No code changes are required.
-
-The plan calls the existing `admin-update-user` function with:
-```json
-{
-  "email": "healingbudsglobal@gmail.com",
-  "password": "12345678",
-  "verify": true
-}
-```
-
-This creates the user, sets the password, confirms the email, and lets the existing trigger handle the admin role — all in one operation.
+| File | Action |
+|---|---|
+| `supabase/functions/admin-provision-users/index.ts` | Create new edge function |
+| `src/pages/AdminClients.tsx` | Add "Provision All Users" button |
+| `supabase/functions/sync-clients/index.ts` | Add auto-provision logic for future syncs |
