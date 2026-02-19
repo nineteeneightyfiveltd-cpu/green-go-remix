@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, ShoppingBag, CreditCard, AlertCircle, Loader2, MapPin, Home, Building2, Check, Pencil } from 'lucide-react';
@@ -108,6 +108,9 @@ const Checkout = () => {
   const [paymentStatus, setPaymentStatus] = useState<string>('');
   const [isLocalOrder, setIsLocalOrder] = useState(false);
   
+  // Ref guard: ensures shipping address is fetched exactly once per mount / per clientId change
+  const hasFetchedAddressRef = useRef(false);
+
   // Shipping address state
   const [shippingAddress, setShippingAddress] = useState<ShippingAddress | null>(null);
   const [savedAddress, setSavedAddress] = useState<ShippingAddress | null>(null);
@@ -165,17 +168,25 @@ const Checkout = () => {
   // Fetch client details to check for shipping address
   // Priority: 1) Manual session save, 2) Local DB, 3) Dr. Green API, 4) Prompt user
   useEffect(() => {
+    // Guard: only run once per mount / per clientId change
+    // Without this, any re-render that creates a new `getClientDetails` reference
+    // causes an infinite API flood loop
+    if (hasFetchedAddressRef.current) return;
+
+    if (addressManuallySaved) {
+      setIsLoadingAddress(false);
+      return;
+    }
+
+    if (!drGreenClient?.drgreen_client_id) {
+      setIsLoadingAddress(false);
+      return;
+    }
+
+    // Mark as fetching — prevents re-entry on subsequent renders
+    hasFetchedAddressRef.current = true;
+
     const checkShippingAddress = async () => {
-      if (addressManuallySaved) {
-        setIsLoadingAddress(false);
-        return;
-      }
-
-      if (!drGreenClient?.drgreen_client_id) {
-        setIsLoadingAddress(false);
-        return;
-      }
-
       // Priority 1: Dr. Green API — always the source of truth for verified address data
       try {
         const result = await getClientDetails(drGreenClient.drgreen_client_id);
@@ -238,7 +249,10 @@ const Checkout = () => {
     };
 
     checkShippingAddress();
-  }, [drGreenClient, getClientDetails, addressManuallySaved, countryCode]);
+  // KEY: depend only on stable string VALUE, not function references
+  // `getClientDetails` creates a new reference every render — including it caused infinite loop
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drGreenClient?.drgreen_client_id, addressManuallySaved]);
 
   // Handle address mode toggle
   const handleAddressModeChange = (mode: 'saved' | 'custom') => {
@@ -250,6 +264,8 @@ const Checkout = () => {
 
   const handleShippingAddressSaved = (address: ShippingAddress) => {
     console.log('[Checkout] Address saved:', address);
+    // Reset the fetch guard so the new address can be re-fetched if needed
+    hasFetchedAddressRef.current = false;
     setAddressManuallySaved(true);
     setShippingAddress(address);
     setSavedAddress(address);

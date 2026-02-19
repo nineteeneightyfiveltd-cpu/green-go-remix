@@ -129,7 +129,9 @@ export function useProducts(countryCode: string = DEFAULT_COUNTRY) {
       // First try to fetch from Dr Green API
       console.log(`Fetching strains from Dr Green API for country: ${alpha3Code}`);
       
-      const { data, error: fnError } = await supabase.functions.invoke('drgreen-proxy', {
+      const PRODUCT_FETCH_TIMEOUT_MS = 15000;
+
+      const fetchPromise = supabase.functions.invoke('drgreen-proxy', {
         body: {
           action: 'get-strains-legacy',
           countryCode: alpha3Code,
@@ -138,6 +140,15 @@ export function useProducts(countryCode: string = DEFAULT_COUNTRY) {
           page: 1,
         },
       });
+
+      const timeoutPromise = new Promise<{ data: null; error: { message: string } }>((_, reject) =>
+        setTimeout(
+          () => reject(new Error('Product loading timed out. Please tap "Try Again".')),
+          PRODUCT_FETCH_TIMEOUT_MS
+        )
+      );
+
+      const { data, error: fnError } = await Promise.race([fetchPromise, timeoutPromise]);
 
       // API response can be:
       // 1. Array of strains directly: [{ id, name, ... }]
