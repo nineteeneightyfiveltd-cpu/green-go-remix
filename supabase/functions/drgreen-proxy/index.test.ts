@@ -13,40 +13,44 @@ import { assertEquals, assertFalse, assert } from "https://deno.land/std@0.224.0
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1: Cart payload MUST be flat format { clientId, strainId, quantity }
 // ─────────────────────────────────────────────────────────────────────────────
-Deno.test("cart payload uses nested format — clientCartId + items[]", () => {
+Deno.test("cart payload uses flat format — clientId + strainId + quantity (per docs)", () => {
   const clientId = "00000000-0000-0000-0000-000000000001";
   const strainId = "00000000-0000-0000-0000-000000000002";
   const quantity = 2;
 
-  // Simulate the correct cart payload builder (confirmed by upstream API error)
+  // Simulate the correct cart payload builder (per DRGREEN-API-FULL-REFERENCE.md line 591-596)
   const itemPayload = {
-    clientCartId: clientId,
-    items: [{ strainId: strainId, quantity: quantity }],
+    clientId: clientId,
+    strainId: strainId,
+    quantity: quantity,
   };
 
-  // Must contain the nested fields the Dr. Green API requires
+  // Must contain the flat fields the Dr. Green API requires
   assert(
-    "clientCartId" in itemPayload,
-    "Payload MUST contain 'clientCartId' — required by Dr. Green API"
-  );
-  assert(
-    "items" in itemPayload,
-    "Payload MUST contain 'items[]' — required by Dr. Green API"
-  );
-  assertFalse(
     "clientId" in itemPayload,
-    "Payload must NOT contain flat 'clientId' field"
+    "Payload MUST contain 'clientId' — required by Dr. Green API (flat format)"
+  );
+  assert(
+    "strainId" in itemPayload,
+    "Payload MUST contain 'strainId' — required by Dr. Green API (flat format)"
+  );
+  assert(
+    "quantity" in itemPayload,
+    "Payload MUST contain 'quantity' — required by Dr. Green API (flat format)"
   );
   assertFalse(
-    "strainId" in itemPayload,
-    "Payload must NOT contain flat 'strainId' field at top level"
+    "clientCartId" in itemPayload,
+    "Payload must NOT contain 'clientCartId' — that is the legacy unsupported format"
+  );
+  assertFalse(
+    "items" in itemPayload,
+    "Payload must NOT contain 'items[]' — that is the legacy unsupported batch format"
   );
 
-  // Validate structure
-  assertEquals(itemPayload.clientCartId, clientId, "clientCartId must equal clientId");
-  assertEquals(itemPayload.items.length, 1, "items must have exactly one entry per call");
-  assertEquals(itemPayload.items[0].strainId, strainId, "items[0].strainId must be set");
-  assertEquals(itemPayload.items[0].quantity, quantity, "items[0].quantity must be set");
+  // Validate values
+  assertEquals(itemPayload.clientId, clientId, "clientId must match");
+  assertEquals(itemPayload.strainId, strainId, "strainId must match");
+  assertEquals(itemPayload.quantity, quantity, "quantity must match");
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
