@@ -40,7 +40,7 @@ import { useOrderTracking } from '@/hooks/useOrderTracking';
 import { useDrGreenApi } from '@/hooks/useDrGreenApi';
 import { useClientResync } from '@/hooks/useClientResync';
 import { supabase } from '@/integrations/supabase/client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { User as SupabaseUser } from '@supabase/supabase-js';
 import { formatPrice } from '@/lib/currency';
 import { useToast } from '@/hooks/use-toast';
@@ -60,6 +60,9 @@ const PatientDashboard = () => {
   const [isLoadingAddress, setIsLoadingAddress] = useState(true);
   const [isAddressDialogOpen, setIsAddressDialogOpen] = useState(false);
   const [showResyncDialog, setShowResyncDialog] = useState(false);
+  // Guard: fetch shipping address only once per clientId — prevents infinite loop
+  // caused by getClientDetails creating a new function reference on every render
+  const hasFetchedAddressRef = useRef(false);
 
   // Handler for re-syncing client account
   const handleResyncAccount = async () => {
@@ -139,14 +142,18 @@ const PatientDashboard = () => {
     Object.entries(COUNTRY_REGISTRY).map(([code, config]) => [code, config.name])
   );
 
-  // Fetch shipping address
+  // Fetch shipping address — runs once per clientId change
+  // NOT depending on getClientDetails (new ref every render → infinite loop)
   useEffect(() => {
-    const fetchShippingAddress = async () => {
-      if (!drGreenClient?.drgreen_client_id) {
-        setIsLoadingAddress(false);
-        return;
-      }
+    if (hasFetchedAddressRef.current) return;
+    if (!drGreenClient?.drgreen_client_id) {
+      setIsLoadingAddress(false);
+      return;
+    }
 
+    hasFetchedAddressRef.current = true;
+
+    const fetchShippingAddress = async () => {
       try {
         // Try Dr Green API first
         const result = await getClientDetails(drGreenClient.drgreen_client_id);
@@ -174,7 +181,8 @@ const PatientDashboard = () => {
     };
 
     fetchShippingAddress();
-  }, [drGreenClient, getClientDetails]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drGreenClient?.drgreen_client_id]); // stable string value only, not function reference
 
   const handleAddressSaved = (address: ShippingAddress) => {
     setShippingAddress(address);
