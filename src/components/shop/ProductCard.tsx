@@ -135,8 +135,7 @@ export function ProductCard({ product, onViewDetails, showDataSource = false }: 
       animate={{ opacity: 1, y: 0 }}
       whileHover={{ y: -6, scale: 1.01 }}
       transition={{ duration: 0.3, ease: "easeOut" }}
-      className="h-full cursor-pointer"
-      onClick={() => navigate(`/shop/strain/${product.id}`)}
+      className="h-full"
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
@@ -144,7 +143,7 @@ export function ProductCard({ product, onViewDetails, showDataSource = false }: 
         <div className="absolute inset-0 bg-gradient-to-br from-white/5 via-transparent to-black/20 pointer-events-none" />
 
         {/* Image / Video */}
-        <div className="relative aspect-square overflow-hidden bg-gradient-to-b from-slate-50 to-slate-100 dark:from-slate-900/40 dark:to-slate-900/60">
+        <div className="relative aspect-square overflow-hidden bg-gradient-to-b from-slate-50 to-slate-100 dark:from-slate-900/40 dark:to-slate-900/60 cursor-pointer" onClick={() => navigate(`/shop/strain/${product.id}`)}>
           {hasVideo ? (
             <video ref={videoRef} src={product.videoUrl} muted loop playsInline autoPlay={isMobile} poster={product.imageUrl} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" />
           ) : (
@@ -181,7 +180,7 @@ export function ProductCard({ product, onViewDetails, showDataSource = false }: 
         <div className="relative p-5 space-y-3">
           {/* 1. Name + Price */}
           <div className="flex items-start justify-between gap-3">
-            <h3 className="font-bold text-lg text-foreground leading-tight line-clamp-1 group-hover:text-primary transition-colors">
+            <h3 className="font-bold text-lg text-foreground leading-tight line-clamp-1 group-hover:text-primary transition-colors cursor-pointer" onClick={() => navigate(`/shop/strain/${product.id}`)}>
               {product.name}
             </h3>
             <div className="flex flex-col items-end shrink-0">
@@ -277,7 +276,7 @@ export function ProductCard({ product, onViewDetails, showDataSource = false }: 
               className="flex-1 h-10 rounded-xl font-semibold transition-all duration-300 shadow-lg hover:shadow-xl text-sm"
               disabled={!product.availability || isAdding}
               variant={addedSuccess ? "default" : (!drGreenClient || !isEligible ? "secondary" : "default")}
-              onClick={(e) => { e.stopPropagation(); handleAddToCart(); }}
+              onClick={async (e) => { e.stopPropagation(); await handleAddToCart(); }}
             >
               {getButtonContent()}
             </Button>
