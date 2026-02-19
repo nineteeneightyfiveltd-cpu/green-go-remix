@@ -2949,7 +2949,7 @@ serve(async (req) => {
       // Updated per API docs: use productId (not strainId), clientId (not clientCartId)
       case "add-to-cart": {
         const cartData = body.data || {};
-        const clientId = cartData.clientId || cartData.cartId;
+        const clientId = cartData.clientId || cartData.cartId || body.clientId;
         if (!clientId) {
           throw new Error("clientId or cartId is required");
         }
@@ -3266,11 +3266,10 @@ serve(async (req) => {
           
           for (let i = 0; i < cartItems.length; i++) {
             const item = cartItems[i];
-          // Flat format per API spec: POST /dapp/carts { clientId, strainId, quantity }
+          // Nested format required by Dr. Green API: POST /dapp/carts { clientCartId, items[] }
           const itemPayload = {
-              clientId: clientId,
-              strainId: item.strainId,
-              quantity: item.quantity,
+              clientCartId: clientId,
+              items: [{ strainId: item.strainId, quantity: item.quantity }],
             };
             
             try {
@@ -3426,8 +3425,8 @@ serve(async (req) => {
           for (let i = 0; i < cartItems.length; i++) {
             const item = cartItems[i];
             try {
-              // Flat format per API spec: POST /dapp/carts { clientId, strainId, quantity }
-              const itemPayload = { clientId: clientId, strainId: item.strainId, quantity: item.quantity };
+              // Nested format required by Dr. Green API: POST /dapp/carts { clientCartId, items[] }
+              const itemPayload = { clientCartId: clientId, items: [{ strainId: item.strainId, quantity: item.quantity }] };
               const resp = await drGreenRequestBody("/dapp/carts", "POST", itemPayload, true, adminEnvConfig);
               if (!resp.ok) {
                 const errText = await resp.clone().text();

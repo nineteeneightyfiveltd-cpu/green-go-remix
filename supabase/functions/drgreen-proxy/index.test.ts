@@ -13,32 +13,40 @@ import { assertEquals, assertFalse, assert } from "https://deno.land/std@0.224.0
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1: Cart payload MUST be flat format { clientId, strainId, quantity }
 // ─────────────────────────────────────────────────────────────────────────────
-Deno.test("cart payload uses flat format — no clientCartId or items[]", () => {
-  const clientId = "test-client-uuid";
-  const strainId = "test-strain-uuid";
+Deno.test("cart payload uses nested format — clientCartId + items[]", () => {
+  const clientId = "00000000-0000-0000-0000-000000000001";
+  const strainId = "00000000-0000-0000-0000-000000000002";
   const quantity = 2;
 
-  // Simulate the corrected cart payload builder
+  // Simulate the correct cart payload builder (confirmed by upstream API error)
   const itemPayload = {
-    clientId: clientId,
-    strainId: strainId,
-    quantity: quantity,
+    clientCartId: clientId,
+    items: [{ strainId: strainId, quantity: quantity }],
   };
 
-  // Must NOT contain legacy fields
-  assertFalse(
+  // Must contain the nested fields the Dr. Green API requires
+  assert(
     "clientCartId" in itemPayload,
-    "Payload must not contain 'clientCartId' (legacy field)"
+    "Payload MUST contain 'clientCartId' — required by Dr. Green API"
+  );
+  assert(
+    "items" in itemPayload,
+    "Payload MUST contain 'items[]' — required by Dr. Green API"
   );
   assertFalse(
-    "items" in itemPayload,
-    "Payload must not contain 'items[]' (legacy nested format)"
+    "clientId" in itemPayload,
+    "Payload must NOT contain flat 'clientId' field"
+  );
+  assertFalse(
+    "strainId" in itemPayload,
+    "Payload must NOT contain flat 'strainId' field at top level"
   );
 
-  // Must contain correct flat fields
-  assertEquals(itemPayload.clientId, clientId, "clientId must be present");
-  assertEquals(itemPayload.strainId, strainId, "strainId must be present");
-  assertEquals(itemPayload.quantity, quantity, "quantity must be present");
+  // Validate structure
+  assertEquals(itemPayload.clientCartId, clientId, "clientCartId must equal clientId");
+  assertEquals(itemPayload.items.length, 1, "items must have exactly one entry per call");
+  assertEquals(itemPayload.items[0].strainId, strainId, "items[0].strainId must be set");
+  assertEquals(itemPayload.items[0].quantity, quantity, "items[0].quantity must be set");
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
