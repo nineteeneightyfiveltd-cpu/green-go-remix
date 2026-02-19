@@ -262,7 +262,10 @@ serve(async (req) => {
         const lastName = client.lastName as string || '';
         const isKYCVerified = client.isKYCVerified as boolean || false;
         const adminApproval = client.adminApproval as string || 'PENDING';
-        const shippings = client.shippings as Array<{ country?: string }> || [];
+        const shippings = client.shippings as Array<{
+          country?: string; countryCode?: string; address1?: string; address2?: string;
+          city?: string; state?: string; postalCode?: string; landmark?: string;
+        }> || [];
         const phoneCountryCode = client.phoneCountryCode as string || '';
         const rawCountry = shippings[0]?.country || phoneCountryCode || 'ZA';
         // Normalize to ISO Alpha-2
@@ -279,16 +282,33 @@ serve(async (req) => {
         };
         const countryCode = countryNameMap[rawCountry] || rawCountry;
 
+        // Map DApp shippings[0] → local shipping_address JSONB
+        const dappShipping = shippings[0];
+        const shippingAddress = dappShipping?.address1 ? {
+          address1: dappShipping.address1,
+          address2: dappShipping.address2 || '',
+          city: dappShipping.city || '',
+          state: dappShipping.state || dappShipping.city || '',
+          postalCode: dappShipping.postalCode || '',
+          country: dappShipping.country || rawCountry,
+          countryCode: dappShipping.countryCode || countryCode,
+          landmark: dappShipping.landmark || '',
+        } : null;
+
         const { data: existing } = await adminClient
-          .from('drgreen_clients').select('id, is_kyc_verified, admin_approval, user_id')
+          .from('drgreen_clients').select('id, is_kyc_verified, admin_approval, user_id, shipping_address')
           .eq('drgreen_client_id', clientId).maybeSingle();
 
         if (existing) {
-          if (existing.is_kyc_verified !== isKYCVerified || existing.admin_approval !== adminApproval) {
+          // Always update shipping_address from DApp if it exists and local is empty
+          const needsShippingUpdate = shippingAddress && !existing.shipping_address;
+          if (existing.is_kyc_verified !== isKYCVerified || existing.admin_approval !== adminApproval || needsShippingUpdate) {
             await adminClient.from('drgreen_clients').update({
               is_kyc_verified: isKYCVerified, admin_approval: adminApproval,
               email, full_name: `${firstName} ${lastName}`.trim(),
-              country_code: countryCode, updated_at: new Date().toISOString(),
+              country_code: countryCode,
+              ...(shippingAddress ? { shipping_address: shippingAddress } : {}),
+              updated_at: new Date().toISOString(),
             }).eq('id', existing.id);
             totalUpdated++;
           }
@@ -304,7 +324,9 @@ serve(async (req) => {
                 drgreen_client_id: clientId, is_kyc_verified: isKYCVerified,
                 admin_approval: adminApproval, email,
                 full_name: `${firstName} ${lastName}`.trim(),
-                country_code: countryCode, updated_at: new Date().toISOString(),
+                country_code: countryCode,
+                ...(shippingAddress ? { shipping_address: shippingAddress } : {}),
+                updated_at: new Date().toISOString(),
               }).eq('id', userExisting.id);
               totalUpdated++;
             } else {
@@ -312,6 +334,7 @@ serve(async (req) => {
                 user_id: userId, drgreen_client_id: clientId,
                 is_kyc_verified: isKYCVerified, admin_approval: adminApproval,
                 email, full_name: `${firstName} ${lastName}`.trim(), country_code: countryCode,
+                ...(shippingAddress ? { shipping_address: shippingAddress } : {}),
               });
               totalCreated++;
             }
@@ -362,6 +385,7 @@ serve(async (req) => {
               email: email || null,
               full_name: `${firstName} ${lastName}`.trim() || null,
               country_code: countryCode,
+              ...(shippingAddress ? { shipping_address: shippingAddress } : {}),
             });
             totalCreated++;
             totalSynced++;
