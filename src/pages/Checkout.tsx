@@ -281,48 +281,12 @@ const Checkout = () => {
       const createdOrderId = orderResult.data.orderId;
       console.log('[Checkout] Order created:', createdOrderId);
 
-      setPaymentStatus('Initiating payment...');
+      setPaymentStatus('Order submitted — awaiting confirmation...');
 
-      // Create payment via Dr Green API
-      const clientCountry = countryCode || drGreenClient.country_code || 'ZA';
-      const paymentResult = await retryOperation(
-        () => createPayment({
-          orderId: createdOrderId,
-          amount: cartTotal,
-          currency: getCurrencyForCountry(clientCountry),
-          clientId: drGreenClient.drgreen_client_id,
-        }),
-        'Create payment'
-      );
-
-      if (paymentResult.error || !paymentResult.data) {
-        throw new Error(paymentResult.error || 'Failed to initiate payment');
-      }
-
-      const paymentId = paymentResult.data.paymentId;
-      setPaymentStatus('Processing payment...');
-
-      // Poll for payment status (simplified - in production would use webhooks)
-      let attempts = 0;
-      const maxAttempts = 10;
-      let finalStatus = 'PENDING';
-      let finalPaymentStatus = 'PENDING';
-      
-      while (attempts < maxAttempts) {
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-        
-        const statusResult = await getPayment(paymentId);
-        
-        if (statusResult.data?.status === 'PAID') {
-          finalStatus = 'CONFIRMED';
-          finalPaymentStatus = 'PAID';
-          break;
-        } else if (statusResult.data?.status === 'FAILED' || statusResult.data?.status === 'CANCELLED') {
-          throw new Error('Payment was not successful');
-        }
-        
-        attempts++;
-      }
+      // Payment is handled externally (Dr. Green portal / webhook).
+      // Complete checkout immediately once we have a real orderId.
+      const finalStatus = 'PENDING';
+      const finalPaymentStatus = 'AWAITING_PAYMENT';
 
       // Save order locally with complete context snapshot for reliable admin sync
       const clientCountryCode = drGreenClient.country_code || countryCode || 'ZA';
@@ -372,8 +336,8 @@ const Checkout = () => {
       });
       
       toast({
-        title: finalPaymentStatus === 'PAID' ? 'Order Placed Successfully' : 'Order Submitted',
-        description: `Your order ${createdOrderId} has been ${finalPaymentStatus === 'PAID' ? 'confirmed' : 'submitted for processing'}.`,
+        title: 'Order Submitted',
+        description: `Your order ${createdOrderId} has been submitted for processing.`,
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);

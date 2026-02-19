@@ -3269,7 +3269,23 @@ serve(async (req) => {
               } catch (scopeErr) {
                 logWarn(`[${requestId}] Failed to record api_key_scope`, { error: String(scopeErr).slice(0, 100) });
               }
-              break;
+              // Normalise and return orderId so frontend can use it directly
+              const rawOrderData = await response.clone().json();
+              const orderId =
+                rawOrderData?.data?.id ||
+                rawOrderData?.data?.orderId ||
+                rawOrderData?.orderId ||
+                rawOrderData?.id ||
+                null;
+              logInfo(`[${requestId}] Extracted orderId: ${orderId}`);
+              return new Response(JSON.stringify({
+                success: true,
+                orderId,
+                status: rawOrderData?.data?.status || 'PENDING',
+                totalAmount: rawOrderData?.data?.totalAmount || rawOrderData?.data?.total || 0,
+                createdAt: rawOrderData?.data?.createdAt || new Date().toISOString(),
+                requestId,
+              }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 });
             } else {
               const orderError = await response.clone().text();
               lastStepError = orderError;
@@ -3352,7 +3368,23 @@ serve(async (req) => {
                 } catch (scopeErr2) {
                   logWarn(`[${requestId}] Failed to record api_key_scope (fallback)`, { error: String(scopeErr2).slice(0, 100) });
                 }
-                break;
+                // Normalise and return orderId from fallback path
+                const rawOrderDataFb = await response.clone().json();
+                const orderIdFb =
+                  rawOrderDataFb?.data?.id ||
+                  rawOrderDataFb?.data?.orderId ||
+                  rawOrderDataFb?.orderId ||
+                  rawOrderDataFb?.id ||
+                  null;
+                logInfo(`[${requestId}] Fallback extracted orderId: ${orderIdFb}`);
+                return new Response(JSON.stringify({
+                  success: true,
+                  orderId: orderIdFb,
+                  status: rawOrderDataFb?.data?.status || 'PENDING',
+                  totalAmount: rawOrderDataFb?.data?.totalAmount || rawOrderDataFb?.data?.total || 0,
+                  createdAt: rawOrderDataFb?.data?.createdAt || new Date().toISOString(),
+                  requestId,
+                }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 });
               } else {
                 const directError = await response.clone().text();
                 lastStepError = directError;
