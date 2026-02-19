@@ -2287,6 +2287,9 @@ serve(async (req) => {
       }
       
       // Get strains list with query signing (Method B - Query Sign)
+      // IMPORTANT: Uses a short 8s timeout with NO retries to prevent the edge function
+      // from hanging for 60s+ (3 retries × 20s = silent death). The client-side
+      // Promise.race at 15s catches failures cleanly with a "Try Again" button.
       case "get-strains-legacy": {
         const { countryCode, orderBy, take, page } = body || {};
         
@@ -2302,7 +2305,44 @@ serve(async (req) => {
         };
         if (countryCode) queryParams.countryCode = countryCode;
         
-        response = await drGreenRequestQuery("/strains", queryParams);
+        // Build signed URL directly with a short 8-second timeout (no retries)
+        // so the function returns before Deno's 60s wall-clock limit
+        const STRAINS_TIMEOUT_MS = 8000;
+        const env = envConfig || ENV_CONFIG.production;
+        const { apiKey: strainsApiKey, privateKey: strainsPrivKey } = getEnvCredentials(env);
+        
+        if (!strainsApiKey || !strainsPrivKey) {
+          throw new Error("API credentials not configured for strains fetch");
+        }
+        
+        // Build signed query string
+        const queryEntries = Object.entries(queryParams)
+          .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+          .join('&');
+        const strainsSignature = await signQueryString(queryEntries, strainsPrivKey);
+        const strainsUrl = `${env.apiUrl}/strains?${queryEntries}`;
+        
+        const strainsController = new AbortController();
+        const strainsTimeoutId = setTimeout(() => strainsController.abort(), STRAINS_TIMEOUT_MS);
+        
+        try {
+          response = await fetch(strainsUrl, {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+              "x-auth-apikey": strainsApiKey,
+              "x-auth-signature": strainsSignature,
+            },
+            signal: strainsController.signal,
+          });
+        } catch (strainsErr: unknown) {
+          if (strainsErr instanceof Error && strainsErr.name === 'AbortError') {
+            throw new Error('Strains API timed out after 8s. Please try again.');
+          }
+          throw strainsErr;
+        } finally {
+          clearTimeout(strainsTimeoutId);
+        }
         break;
       }
       
