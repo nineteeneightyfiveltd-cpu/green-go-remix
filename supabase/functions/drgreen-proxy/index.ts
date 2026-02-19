@@ -1969,24 +1969,32 @@ serve(async (req) => {
     // Extract requested environment from body (supports production and railway)
     const requestedEnv = body?.env as string | undefined;
 
-    // SAFETY GUARD: Patient-facing transactional actions ALWAYS use production,
-    // regardless of what env the admin selector has set in the browser.
-    const PATIENT_TRANSACTIONAL_ACTIONS = [
-      'create-order', 'add-to-cart', 'create-payment',
-      'get-payment', 'update-shipping-address', 'get-my-details',
-      'get-orders', 'empty-cart', 'place-order',
+    // SAFETY GUARD: Whitelist approach — only explicitly listed admin debug actions
+    // may use the railway (staging) environment. Everything else ALWAYS uses production.
+    // This means localStorage env selector can never poison patient-facing flows.
+    const ADMIN_DEBUG_ONLY_ACTIONS = [
+      'dapp-clients', 'dapp-client-details', 'dapp-orders', 'dapp-order-details',
+      'dapp-update-order', 'dapp-strains', 'dapp-carts', 'dapp-nfts',
+      'dashboard-summary', 'dashboard-analytics', 'sales-summary',
+      'get-sales', 'get-sales-summary', 'get-clients-summary',
+      'sync-client-status', 'dapp-verify-client', 'dapp-clients-list',
+      'admin-list-all-clients', 'delete-client', 'patch-client',
+      'activate-client', 'deactivate-client', 'bulk-delete-clients',
+      'admin-update-shipping-address', 'admin-reregister-client',
+      'get-client-orders', 'get-user-nfts', 'get-user-me',
     ];
-    const isTransactional = PATIENT_TRANSACTIONAL_ACTIONS.includes(action);
-    if (isTransactional && requestedEnv === 'railway') {
-      console.warn(`[drgreen-proxy] SAFETY: Forcing production for transactional action "${action}" (requested: railway)`);
+    const isAdminDebugAction = ADMIN_DEBUG_ONLY_ACTIONS.includes(action);
+    // Force production for ALL non-admin actions, regardless of requested env
+    const effectiveEnv = isAdminDebugAction ? (requestedEnv || 'production') : 'production';
+    if (!isAdminDebugAction && requestedEnv && requestedEnv !== 'production') {
+      console.warn(`[drgreen-proxy] SAFETY: Forcing production for action "${action}" (requested: ${requestedEnv}). Non-admin actions always use production.`);
     }
-    const effectiveEnv = (isTransactional && requestedEnv === 'railway') ? 'production' : requestedEnv;
 
     const envConfig = getEnvironment(effectiveEnv);
     // All actions use the same credentials per environment — no separate write keys
     const adminEnvConfig = envConfig; // Alias for backwards compatibility
     if (requestedEnv) {
-      console.log(`[drgreen-proxy] Using environment: ${envConfig.name} (${effectiveEnv})`);
+      console.log(`[drgreen-proxy] Using environment: ${envConfig.name} (effective: ${effectiveEnv})`);
     }
     
     let response: Response;
