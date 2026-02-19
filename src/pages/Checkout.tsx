@@ -111,16 +111,60 @@ const Checkout = () => {
   // Shipping address state
   const [shippingAddress, setShippingAddress] = useState<ShippingAddress | null>(null);
   const [savedAddress, setSavedAddress] = useState<ShippingAddress | null>(null);
+  const [partialAddress, setPartialAddress] = useState<Partial<ShippingAddress> | null>(null);
   const [isLoadingAddress, setIsLoadingAddress] = useState(true);
   const [needsShippingAddress, setNeedsShippingAddress] = useState(false);
   const [addressMode, setAddressMode] = useState<'saved' | 'custom'>('saved');
   const [addressManuallySaved, setAddressManuallySaved] = useState(false);
 
+  // Helper: extract best shipping object from DApp response, handling all envelope shapes
+  const extractShipping = (data: unknown): Record<string, unknown> | null => {
+    if (!data || typeof data !== 'object') return null;
+    const d = data as Record<string, unknown>;
+
+    // Shape 1: data.shipping (proxy-normalized)
+    const shipping = d.shipping as Record<string, unknown> | undefined;
+    if (shipping && typeof shipping === 'object') {
+      // If it has a real address1, return it directly
+      if (shipping.address1) return shipping;
+      // Otherwise keep it as partial (may have country/currency)
+      const partial = shipping;
+      // Shape 2: data.shippings[] — array from DApp direct endpoint
+      const shippings = d.shippings as Record<string, unknown>[] | undefined;
+      const firstShipping = Array.isArray(shippings) ? shippings[0] : null;
+      if (firstShipping?.address1) return firstShipping;
+      // Merge: prefer shippings[0] for any extra fields, fall back to shipping
+      if (firstShipping) return { ...partial, ...firstShipping };
+      return partial;
+    }
+    // Shape 3: nested envelope data.data.shipping
+    const inner = d.data as Record<string, unknown> | undefined;
+    if (inner) return extractShipping(inner);
+    return null;
+  };
+
+  // Resolve country code from DApp client record (shippings[] has currency/country text)
+  const resolveCountryFromDApp = (data: unknown): string => {
+    if (!data || typeof data !== 'object') return '';
+    const d = data as Record<string, unknown>;
+    const shippings = d.shippings as Record<string, unknown>[] | undefined;
+    const shipping = d.shipping as Record<string, unknown> | undefined;
+    const countryCodeRaw = (shippings?.[0]?.countryCode as string)
+      || (shipping?.countryCode as string)
+      || (d.phoneCountryCode as string) // e.g. "PT" fallback
+      || '';
+    // Map country name -> code if needed
+    const countryNameMap: Record<string, string> = {
+      'South Africa': 'ZA', 'United Kingdom': 'GB', 'Portugal': 'PT', 'Thailand': 'TH',
+    };
+    const countryName = (shippings?.[0]?.country as string) || (shipping?.country as string) || '';
+    return countryCodeRaw || countryNameMap[countryName] || '';
+  };
+
   // Fetch client details to check for shipping address
   // Priority: 1) Manual session save, 2) Local DB, 3) Dr. Green API, 4) Prompt user
   useEffect(() => {
     const checkShippingAddress = async () => {
-      // Skip re-fetch if user already saved address manually
       if (addressManuallySaved) {
         setIsLoadingAddress(false);
         return;
@@ -131,11 +175,11 @@ const Checkout = () => {
         return;
       }
 
-      // First, check local database for shipping address (faster, more reliable)
+      // Priority 1: local DB (fast)
       const localShipping = drGreenClient.shipping_address;
-      if (localShipping && localShipping.address1) {
+      if (localShipping && (localShipping as Record<string, unknown>).address1) {
         console.log('[Checkout] Using shipping address from local DB');
-        const addr = localShipping as ShippingAddress;
+        const addr = localShipping as unknown as ShippingAddress;
         setSavedAddress(addr);
         setShippingAddress(addr);
         setNeedsShippingAddress(false);
@@ -144,35 +188,42 @@ const Checkout = () => {
         return;
       }
 
-      // Fallback: try Dr. Green API
+      // Priority 2: Dr. Green API
       try {
         const result = await getClientDetails(drGreenClient.drgreen_client_id);
-        
+
         if (result.error) {
-          console.warn('Could not fetch client details from API:', result.error);
+          console.warn('[Checkout] Could not fetch client details:', result.error);
           setNeedsShippingAddress(true);
         } else {
-          // Proxy may return shipping at result.data.shipping (local fallback)
-          // or result.data.data.shipping (when wrapped by DApp API response envelope)
           const raw = result.data as Record<string, unknown> | null;
-          const inner = (raw?.data as Record<string, unknown> | undefined) || raw;
-          const shipping = inner?.shipping as Record<string, unknown> | undefined;
+          const shipping = extractShipping(raw);
 
           if (shipping?.address1) {
-            console.log('[Checkout] Shipping pulled from DApp/local:', shipping);
+            // Full address available — use it directly
+            console.log('[Checkout] Full shipping address from DApp:', shipping);
             const addr = shipping as unknown as ShippingAddress;
             setSavedAddress(addr);
             setShippingAddress(addr);
             setNeedsShippingAddress(false);
             setAddressMode('saved');
           } else {
-            console.log('[Checkout] No shipping address found in client record, prompting user');
+            // No complete address — but capture partial data (country etc.) for auto-fill hint
+            const detectedCountry = resolveCountryFromDApp(raw) || drGreenClient.country_code || countryCode || 'ZA';
+            console.log('[Checkout] No full shipping address — partial country hint:', detectedCountry);
+            if (shipping) {
+              setPartialAddress({
+                country: (shipping.country as string) || '',
+                countryCode: detectedCountry,
+              });
+            } else {
+              setPartialAddress({ countryCode: detectedCountry });
+            }
             setNeedsShippingAddress(true);
           }
         }
       } catch (error) {
-        console.error('Failed to fetch client details:', error);
-        // Graceful fallback: prompt for address instead of blocking
+        console.error('[Checkout] Failed to fetch client details:', error);
         setNeedsShippingAddress(true);
       } finally {
         setIsLoadingAddress(false);
@@ -180,7 +231,7 @@ const Checkout = () => {
     };
 
     checkShippingAddress();
-  }, [drGreenClient, getClientDetails, addressManuallySaved]);
+  }, [drGreenClient, getClientDetails, addressManuallySaved, countryCode]);
 
   // Handle address mode toggle
   const handleAddressModeChange = (mode: 'saved' | 'custom') => {
@@ -549,18 +600,18 @@ const Checkout = () => {
                   ) : needsShippingAddress ? (
                     // No saved address - show form directly
                     <div className="space-y-4">
-                      <Alert className="bg-muted/30 border-border/50">
+                    <Alert className="bg-muted/30 border-border/50">
                         <MapPin className="h-4 w-4" />
                         <AlertTitle>Shipping Address Required</AlertTitle>
                         <AlertDescription>
-                          Please add your shipping address to continue.
+                          Please enter your delivery address below to continue.
                         </AlertDescription>
                       </Alert>
                       
                       {drGreenClient && (
                         <ShippingAddressForm
                           clientId={drGreenClient.drgreen_client_id}
-                          defaultCountry={drGreenClient.country_code || countryCode || 'ZA'}
+                          defaultCountry={partialAddress?.countryCode || drGreenClient.country_code || countryCode || 'ZA'}
                           onSuccess={handleShippingAddressSaved}
                           submitLabel="Save & Continue"
                         />
@@ -631,11 +682,11 @@ const Checkout = () => {
                           
                           {/* Show form when custom selected */}
                           {addressMode === 'custom' && drGreenClient && (
-                            <div className="pt-4 border-t border-border/50">
+                            <div className="pt-4 border-t border-border/50 space-y-3">
                               <ShippingAddressForm
                                 clientId={drGreenClient.drgreen_client_id}
                                 initialAddress={null}
-                                defaultCountry={savedAddress?.countryCode || drGreenClient.country_code || countryCode || 'ZA'}
+                                defaultCountry={savedAddress?.countryCode || partialAddress?.countryCode || drGreenClient.country_code || countryCode || 'ZA'}
                                 onSuccess={handleShippingAddressSaved}
                                 submitLabel="Confirm Address"
                                 variant="inline"

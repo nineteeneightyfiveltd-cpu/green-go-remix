@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { z } from 'zod';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { MapPin, Loader2, Save, Check } from 'lucide-react';
+import { MapPin, Loader2, Save, Check, Clipboard } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -168,8 +168,8 @@ export function ShippingAddressForm({
   const { toast } = useToast();
   const { updateShippingAddress, adminUpdateShippingAddress } = useDrGreenApi();
 
-  // Determine initial country from address or default
-    const initialCountry = initialAddress?.countryCode
+  // Determine initial country: prefer initialAddress, then defaultCountry
+  const initialCountry = initialAddress?.countryCode
     ? toAlpha2(initialAddress.countryCode) || defaultCountry
     : defaultCountry;
 
