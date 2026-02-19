@@ -14,6 +14,16 @@
 // Types
 // ---------------------------------------------------------------------------
 
+export interface AddressHints {
+  address1: string;
+  address2: string;
+  city: string;
+  state: string;
+  /** Label for the state/region field (e.g. "Province", "County", "Distrito") */
+  stateLabel: string;
+  landmark: string;
+}
+
 export interface CountryConfig {
   alpha2: string;
   alpha3: string;
@@ -37,6 +47,8 @@ export interface CountryConfig {
   contactPhone: string;
   contactAddress: string;
   contactCity: string;
+  // Address field placeholder hints (locale-aware)
+  addressHints: AddressHints;
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +80,14 @@ export const COUNTRY_REGISTRY: Record<string, CountryConfig> = {
     contactPhone: '+351 210 123 456',
     contactAddress: 'Avenida D. João II, 98 A',
     contactCity: '1990-100 Lisboa, Portugal',
+    addressHints: {
+      address1: 'ex. Rua das Flores, 25',
+      address2: 'ex. Andar 3, Fração B',
+      city: 'ex. Lisboa',
+      state: 'ex. Setúbal',
+      stateLabel: 'Distrito',
+      landmark: 'ex. perto da Estação do Oriente',
+    },
   },
   GB: {
     alpha2: 'GB', alpha3: 'GBR', name: 'United Kingdom',
@@ -83,6 +103,14 @@ export const COUNTRY_REGISTRY: Record<string, CountryConfig> = {
     contactPhone: '+44 20 7123 4567',
     contactAddress: '123 Harley Street',
     contactCity: 'London W1G 6AX, United Kingdom',
+    addressHints: {
+      address1: 'e.g. 12 High Street',
+      address2: 'e.g. Flat 2A',
+      city: 'e.g. London',
+      state: 'e.g. Surrey',
+      stateLabel: 'County',
+      landmark: 'e.g. near the post office',
+    },
   },
   ZA: {
     alpha2: 'ZA', alpha3: 'ZAF', name: 'South Africa',
@@ -98,6 +126,14 @@ export const COUNTRY_REGISTRY: Record<string, CountryConfig> = {
     contactPhone: '+27 11 123 4567',
     contactAddress: '123 Sandton Drive',
     contactCity: 'Sandton 2196, South Africa',
+    addressHints: {
+      address1: 'e.g. 45 Main Road',
+      address2: 'e.g. Unit 5B',
+      city: 'e.g. Cape Town',
+      state: 'e.g. Western Cape',
+      stateLabel: 'Province',
+      landmark: 'e.g. near the shopping centre',
+    },
   },
   TH: {
     alpha2: 'TH', alpha3: 'THA', name: 'Thailand',
@@ -113,6 +149,14 @@ export const COUNTRY_REGISTRY: Record<string, CountryConfig> = {
     contactPhone: '+66 2 123 4567',
     contactAddress: '123 Sukhumvit Road',
     contactCity: 'Bangkok 10110, Thailand',
+    addressHints: {
+      address1: 'e.g. 88 Charoen Krung Rd',
+      address2: 'e.g. Room 4B',
+      city: 'e.g. Bangkok',
+      state: 'e.g. Chiang Rai',
+      stateLabel: 'Changwat (Province)',
+      landmark: 'e.g. near BTS station',
+    },
   },
   US: {
     alpha2: 'US', alpha3: 'USA', name: 'United States',
@@ -128,6 +172,14 @@ export const COUNTRY_REGISTRY: Record<string, CountryConfig> = {
     contactPhone: '+1 (555) 123-4567',
     contactAddress: '123 Fifth Avenue',
     contactCity: 'New York, NY 10001, USA',
+    addressHints: {
+      address1: 'e.g. 123 Main Street',
+      address2: 'e.g. Apt 4B',
+      city: 'e.g. New York',
+      state: 'e.g. New York',
+      stateLabel: 'State',
+      landmark: 'e.g. near Central Park',
+    },
   },
 };
 
