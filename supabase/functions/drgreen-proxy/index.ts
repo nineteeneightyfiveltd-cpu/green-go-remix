@@ -2938,11 +2938,10 @@ serve(async (req) => {
           throw new Error("quantity must be at least 1");
         }
         
-        // POST /dapp/carts - flat format matching create-order flow
+        // POST /dapp/carts - API expects clientCartId + items[]
         const cartPayload = {
-          clientId: clientId,
-          strainId: cartData.strainId,
-          quantity: cartData.quantity,
+          clientCartId: clientId,
+          items: [{ strainId: cartData.strainId, quantity: cartData.quantity }],
         };
         
         logInfo("Adding to cart", { 
@@ -3239,10 +3238,9 @@ serve(async (req) => {
           
           for (let i = 0; i < cartItems.length; i++) {
             const item = cartItems[i];
-            const itemPayload = {
-              clientId: clientId,
-              strainId: item.strainId,
-              quantity: item.quantity,
+          const itemPayload = {
+              clientCartId: clientId,
+              items: [{ strainId: item.strainId, quantity: item.quantity }],
             };
             
             try {
@@ -3398,7 +3396,7 @@ serve(async (req) => {
           for (let i = 0; i < cartItems.length; i++) {
             const item = cartItems[i];
             try {
-              const itemPayload = { clientId, strainId: item.strainId, quantity: item.quantity };
+              const itemPayload = { clientCartId: clientId, items: [{ strainId: item.strainId, quantity: item.quantity }] };
               const resp = await drGreenRequestBody("/dapp/carts", "POST", itemPayload, true, adminEnvConfig);
               if (!resp.ok) {
                 const errText = await resp.clone().text();
