@@ -18,7 +18,7 @@ Deno.test("cart payload uses flat format — clientId + strainId + quantity (per
   const strainId = "00000000-0000-0000-0000-000000000002";
   const quantity = 2;
 
-  // Simulate the correct cart payload builder (per DRGREEN-API-FULL-REFERENCE.md line 591-596)
+  // Simulate the correct cart payload builder (per DRGREEN-API-FULL-REFERENCE.md and DRGREEN_API_ENDPOINTS.md)
   const itemPayload = {
     clientId: clientId,
     strainId: strainId,

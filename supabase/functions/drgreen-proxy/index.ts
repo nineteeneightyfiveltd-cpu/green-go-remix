@@ -2960,10 +2960,11 @@ serve(async (req) => {
           throw new Error("quantity must be at least 1");
         }
         
-        // POST /dapp/carts - API expects clientCartId + items[]
+        // POST /dapp/carts - flat format required by Dr. Green API docs
         const cartPayload = {
-          clientCartId: clientId,
-          items: [{ strainId: cartData.strainId, quantity: cartData.quantity }],
+          clientId: clientId,
+          strainId: cartData.strainId,
+          quantity: cartData.quantity,
         };
         
         logInfo("Adding to cart", { 
@@ -3103,9 +3104,10 @@ serve(async (req) => {
         // First check if client already has shipping on the API - skip if so
         if (orderData.shippingAddress) {
           // Pre-check: fetch client to see if shipping already exists
+          // NOTE: GET /dapp/clients/:id returns 401 — use findClientById() which paginates the list
           let existingShipping = false;
           try {
-          const clientCheckResponse = await drGreenRequestQuery(`/dapp/clients/${clientId}`, {}, false, adminEnvConfig);
+          const clientCheckResponse = await findClientById(clientId, adminEnvConfig);
             if (clientCheckResponse.ok) {
               const clientData = await clientCheckResponse.clone().json();
               const innerClientData = clientData?.data || clientData;
@@ -3182,10 +3184,33 @@ serve(async (req) => {
                   logWarn(`[${requestId}] Step 1: PUT fallback exception`, { error: String(putErr).slice(0, 200) });
                 }
               } else {
-                const responseData = await shippingResponse.clone().json();
-                const returnedShipping = responseData?.data?.shipping || responseData?.shipping;
-                if (returnedShipping && returnedShipping.address1) {
-                  shippingVerified = true;
+                // PATCH returned 200 — verify shipping was registered by re-fetching client
+                // (PATCH response does not echo back shipping fields, so we cannot trust it)
+                logInfo(`[${requestId}] Step 1: PATCH returned 200, verifying shipping was registered...`);
+                try {
+                  const verifyResponse = await findClientById(clientId, adminEnvConfig);
+                  if (verifyResponse.ok) {
+                    const verifyData = await verifyResponse.clone().json();
+                    const innerData = verifyData?.data || verifyData;
+                    const singularS = innerData?.shipping as Record<string, unknown> | null;
+                    const pluralS = Array.isArray(innerData?.shippings)
+                      ? (innerData.shippings as Record<string, unknown>[]).find(
+                          (s) => s?.address1 && String(s.address1).trim().length > 0
+                        )
+                      : null;
+                    const verifiedShipping =
+                      singularS?.address1 && String(singularS.address1).trim().length > 0
+                        ? singularS
+                        : pluralS;
+                    if (verifiedShipping?.address1) {
+                      logInfo(`[${requestId}] Step 1: Shipping CONFIRMED on Dr. Green side`, { city: verifiedShipping.city });
+                      shippingVerified = true;
+                    } else {
+                      logWarn(`[${requestId}] Step 1: PATCH 200 but shipping NOT yet visible on Dr. Green — will wait`);
+                    }
+                  }
+                } catch (verifyErr) {
+                  logWarn(`[${requestId}] Step 1: Post-PATCH verify failed`, { error: String(verifyErr).slice(0, 100) });
                 }
               }
             } catch (shippingErr) {
@@ -3221,9 +3246,12 @@ serve(async (req) => {
             logWarn(`[${requestId}] Step 1: Local shipping save failed`, { error: String(localSaveErr).slice(0, 100) });
           }
 
-          // Always wait — Dr. Green API needs time to register shipping before cart adds
-          const shippingWait = existingShipping ? 1500 : 3000;
-          logInfo(`[${requestId}] Step 1: Waiting ${shippingWait}ms for Dr. Green API shipping propagation`);
+          // Wait based on shipping verification state:
+          // - 0ms if shipping confirmed via re-fetch (no propagation needed)
+          // - 2000ms if shipping existed before (minor buffer)
+          // - 5000ms if PATCH was done but NOT confirmed (needs full propagation)
+          const shippingWait = shippingVerified ? 0 : (existingShipping ? 2000 : 5000);
+          logInfo(`[${requestId}] Step 1: Waiting ${shippingWait}ms for Dr. Green API shipping propagation`, { shippingVerified, existingShipping });
           await sleep(shippingWait);
         }
         
