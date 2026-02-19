@@ -710,6 +710,24 @@ serve(async (req) => {
           logError('Error updating order');
         } else {
           logInfo(`Order updated successfully`);
+
+          // Broadcast order-change event so any UI channel listener also gets notified
+          try {
+            const orderChannel = supabase.channel('order-updates');
+            await orderChannel.send({
+              type: 'broadcast',
+              event: 'order-change',
+              payload: {
+                orderId: payload.orderId,
+                status: updates.status || null,
+                payment_status: updates.payment_status || null,
+                event: payload.event,
+              },
+            });
+            await supabase.removeChannel(orderChannel);
+          } catch (broadcastErr) {
+            logInfo('Order broadcast skipped (non-critical)');
+          }
         }
       }
 

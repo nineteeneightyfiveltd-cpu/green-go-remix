@@ -1,5 +1,6 @@
 import { useParams, useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { format } from "date-fns";
 import { ArrowLeft, Package, CreditCard, MapPin, RefreshCw, Printer, Clock, CheckCircle2 } from "lucide-react";
 import { motion } from "framer-motion";
@@ -89,7 +90,10 @@ function getTimelineIndex(status: string, paymentStatus: string): number {
 export default function OrderDetail() {
   const { orderId } = useParams<{ orderId: string }>();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { convertFromEUR, countryCode } = useShop();
+  const [isLive, setIsLive] = useState(false);
+
   const { data: order, isLoading } = useQuery({
     queryKey: ["order-detail", orderId],
     queryFn: async () => {
@@ -107,6 +111,33 @@ export default function OrderDetail() {
     },
     enabled: !!orderId,
   });
+
+  // Realtime subscription — invalidates query when webhook updates this order row
+  useEffect(() => {
+    if (!orderId) return;
+
+    const channel = supabase
+      .channel(`order-detail-${orderId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'drgreen_orders',
+          filter: `id=eq.${orderId}`,
+        },
+        () => {
+          queryClient.invalidateQueries({ queryKey: ['order-detail', orderId] });
+        }
+      )
+      .subscribe((status) => {
+        setIsLive(status === 'SUBSCRIBED');
+      });
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [orderId, queryClient]);
 
   const timelineIdx = order ? getTimelineIndex(order.status, order.payment_status) : 0;
 
@@ -151,7 +182,18 @@ export default function OrderDetail() {
                 {/* Header */}
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                   <div>
-                    <h1 className="text-2xl font-bold text-foreground">Order Details</h1>
+                    <div className="flex items-center gap-2">
+                      <h1 className="text-2xl font-bold text-foreground">Order Details</h1>
+                      {isLive && (
+                        <span className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400 font-medium">
+                          <span className="relative flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400/80 opacity-75" />
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500 dark:bg-emerald-400" />
+                          </span>
+                          Live
+                        </span>
+                      )}
+                    </div>
                     <p className="text-sm text-muted-foreground mt-1">
                       <code className="bg-muted px-2 py-0.5 rounded text-xs">
                         {order.drgreen_order_id}
