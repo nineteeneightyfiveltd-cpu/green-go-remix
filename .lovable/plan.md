@@ -1,167 +1,148 @@
 
-## Definitive Root Cause — Now Confirmed
+## Root Cause Identified — Benjamin's Orders Always Fail With 400
 
-### Problem 1: The shipping pre-check uses `GET /dapp/clients/:clientId` which returns 401
+### The Data
 
-At line 3108, the proxy calls:
-```typescript
-const clientCheckResponse = await drGreenRequestQuery(`/dapp/clients/${clientId}`, {}, false, adminEnvConfig);
-```
+Every order in the DB for `a4357132` (Benjamin/varseainc@gmail.com) fails with one of two errors alternating:
 
-But the comment at line 2502 in the SAME file says: **"GET /dapp/clients/{id} returns 401"** — which is why `findClientById()` exists as an alternative that pages through the client list.
+- `ORDER_CREATION_FAILED` (Status 400)  
+- `SHIPPING_ADDRESS_REQUIRED` (Status 400)
 
-When `clientCheckResponse.ok` is false (401), the catch at line 3132 fires with "will attempt PATCH". That's correct behavior. But then the PATCH at line 3159 runs. Let's trace what the PATCH response looks like.
-
-### Problem 2: The PATCH response shape doesn't match what the code expects
-
-The code at line 3185-3189 expects:
-```typescript
-const returnedShipping = responseData?.data?.shipping || responseData?.shipping;
-if (returnedShipping && returnedShipping.address1) {
-  shippingVerified = true;
-}
-```
-
-If the PATCH returns `{ success: true, data: { id: "...", ... } }` without a `shipping` field echoed back, `shippingVerified` stays `false`. The code still proceeds to cart add. If the PATCH actually worked, there'd be a propagation delay before the API registers the shipping.
-
-### Problem 3: `shippingVerified = false` + "shipping address not found" triggers the wrong error
-
-Because `shippingVerified` stays `false` AND the cart add fails with "shipping address not found", the code enters the retry loop at line 3304-3308 with progressively longer waits (1.5s, 3s) — still against an API that may not have propagated the shipping yet.
-
-### Problem 4: No verification that PATCH actually registered on Dr. Green's side
-
-After the PATCH, there is no second call to confirm the shipping was stored. The code assumes the PATCH worked (even if response body doesn't confirm it) and proceeds. If the Dr. Green API has a propagation delay for PATCH → cart add, the retries are not waiting long enough.
-
-### Problem 5: `add-to-cart` standalone case still uses `clientCartId + items[]`
-
-Line 2964-2966:
-```typescript
-const cartPayload = {
-  clientCartId: clientId,
-  items: [{ strainId: cartData.strainId, quantity: cartData.quantity }],
-};
-```
-
-This is the standalone action (not `create-order`). The `create-order` flow correctly uses flat format. But `add-to-cart` standalone is wrong. This is a secondary issue — it doesn't block order placement but should be fixed for consistency.
+The local DB **does** have a valid shipping address: `123 Rivonia Road, Johannesburg, ZAF, 2196`. The client is fully verified (`is_kyc_verified: true`, `admin_approval: VERIFIED`). So the problem is NOT eligibility, NOT the shipping address being missing locally.
 
 ---
 
-## The Fix — Four Targeted Changes to `drgreen-proxy/index.ts`
+### The Real Problems — Three Separate Issues
 
-### Fix 1: Replace the broken `GET /dapp/clients/:clientId` pre-check with `findClientById()`
+#### Problem 1: The Checkout passes `productId` but the cart needs `strainId`
 
-**Current code (line 3107-3131) — broken:**
+In `Checkout.tsx` line 343–348, items are mapped as:
 ```typescript
-const clientCheckResponse = await drGreenRequestQuery(`/dapp/clients/${clientId}`, {}, false, adminEnvConfig);
-if (clientCheckResponse.ok) {
-  const clientData = await clientCheckResponse.clone().json();
-  ...
-}
+items: cart.map(item => ({
+  productId: item.strain_id,   // <-- sent as productId
+  quantity: item.quantity,
+  price: item.unit_price,
+})),
 ```
 
-**Replace with `findClientById()` which paginates through client list (the correct approach):**
+In the proxy (line 3275–3278), the map is:
 ```typescript
-const clientCheckResponse = await findClientById(clientId, adminEnvConfig);
-if (clientCheckResponse.ok) {
-  const clientData = await clientCheckResponse.clone().json();
-  ...
-}
+strainId: item.strainId || item.productId,   // productId fallback exists
 ```
 
-This is a one-line change. `findClientById` returns the same response shape (`{ success: true, data: client }`), so the `clientData?.data` parsing at line 3111 works identically.
+So `productId` DOES fall through to `strainId`. This is **not** the bug but confirms what's being sent.
 
-### Fix 2: After the PATCH succeeds, re-verify shipping via `findClientById()` instead of trusting the PATCH response body
+The `strain_id` in the cart comes from local DB: `7a268bf3-6ab6-4219-9189-7169e3a4276d` (Blue Zushi). **This must match the Dr. Green API's internal strain UUID.** If the local DB strain IDs are from a previous sync and the Dr. Green API has rotated them, the POST /dapp/carts will return 400 "strain not found" — which shows as `ORDER_CREATION_FAILED`.
 
-After line 3184 (PATCH returned ok), instead of just checking `responseData?.data?.shipping`, do a re-fetch:
-```typescript
-} else {
-  // PATCH returned 200 — verify shipping was registered by re-fetching client
-  logInfo(`[${requestId}] Step 1: PATCH returned 200, verifying shipping was registered...`);
-  try {
-    const verifyResponse = await findClientById(clientId, adminEnvConfig);
-    if (verifyResponse.ok) {
-      const verifyData = await verifyResponse.clone().json();
-      const innerData = verifyData?.data || verifyData;
-      const verifiedShipping = innerData?.shipping || 
-        (Array.isArray(innerData?.shippings) 
-          ? innerData.shippings.find((s: any) => s?.address1?.trim()) 
-          : null);
-      if (verifiedShipping?.address1?.trim()) {
-        logInfo(`[${requestId}] Step 1: Shipping CONFIRMED on Dr. Green side`, { city: verifiedShipping.city });
-        shippingVerified = true;
-      } else {
-        logWarn(`[${requestId}] Step 1: PATCH 200 but shipping NOT yet visible on Dr. Green — will wait`);
-      }
-    }
-  } catch (verifyErr) {
-    logWarn(`[${requestId}] Step 1: Post-PATCH verify failed`, { error: String(verifyErr).slice(0, 100) });
+#### Problem 2: `findClientById` is paginating but Benjamin is NOT being found
+
+The `findClientById` helper paginates through `GET /dapp/clients` with `take=20, page N`. If Benjamin was registered under a **different API key** (the old key, before rehoming), he won't appear in the current key's client list. The pre-check at line 3110 will fail with 404 ("Client not found"), but `existingShipping` stays `false`, so the code does a PATCH to update shipping.
+
+The PATCH at line 3161: `PATCH /dapp/clients/{clientId}` — if the API key doesn't own this client, this returns **400 or 403**, not a shipping error. That produces `ORDER_CREATION_FAILED`.
+
+#### Problem 3: The PATCH payload shape is wrong
+
+The shipping PATCH at line 3142–3153 sends:
+```json
+{
+  "shipping": {
+    "address1": "123 Rivonia Road",
+    "city": "Johannesburg",
+    ...
   }
 }
 ```
 
-### Fix 3: Increase the shipping wait from 1.5–3s to 5s when shipping is NOT verified
-
-The current wait is:
-```typescript
-const shippingWait = existingShipping ? 1500 : 3000;
+The Dr. Green `PATCH /dapp/clients/:id` endpoint — per the API full reference and the Postman spec — expects the shipping **directly in the body without the `shipping` wrapper key**:
+```json
+{
+  "address1": "123 Rivonia Road",
+  "city": "Johannesburg",
+  ...
+}
 ```
 
-Change to:
-```typescript
-const shippingWait = shippingVerified ? 0 : (existingShipping ? 2000 : 5000);
-```
-
-- If shipping was verified on Dr. Green: no extra wait (we confirmed it's there)
-- If shipping already existed: 2s wait
-- If PATCH was done but not confirmed: 5s wait to let the API propagate
-
-### Fix 4: Fix `add-to-cart` standalone payload (line 2964-2966)
-
-Change:
-```typescript
-const cartPayload = {
-  clientCartId: clientId,
-  items: [{ strainId: cartData.strainId, quantity: cartData.quantity }],
-};
-```
-
-To (matching the `create-order` flow and the official docs):
-```typescript
-const cartPayload = {
-  clientId: clientId,
-  strainId: cartData.strainId,
-  quantity: cartData.quantity,
-};
-```
+OR it expects shipping nested differently. The wrapper `{ "shipping": { ... } }` format is what we send when **creating** a client. The PATCH endpoint may not accept it wrapped. This explains why PATCH returns OK (200) but shipping is still "not found" — the API accepted the PATCH but ignored the unknown `shipping` key.
 
 ---
 
-## Files to Change
+### The Fix Plan — Three Changes
+
+#### Fix 1: Unwrap the PATCH payload — send shipping fields at the top level
+
+**File:** `supabase/functions/drgreen-proxy/index.ts`  
+**Lines 3142–3153** — Change the `shippingPayload` from wrapped to flat:
+
+```typescript
+// CURRENT (WRONG — shipping nested under 'shipping' key):
+const shippingPayload = {
+  shipping: {
+    address1: addr.street || addr.address1 || '',
+    ...
+  }
+};
+
+// FIX (CORRECT — shipping fields at top level for PATCH):
+const shippingPayload = {
+  address1: addr.street || addr.address1 || '',
+  address2: addr.address2 || '',
+  landmark: addr.landmark || '',
+  city: addr.city || '',
+  state: addr.state || addr.city || '',
+  country: addr.country || '',
+  countryCode: normalisedCountryCode,
+  postalCode: addr.zipCode || addr.postalCode || '',
+};
+```
+
+#### Fix 2: If `findClientById` returns 404 (client not found in this API key's scope), skip the PATCH entirely and proceed with cart add using the local shipping address
+
+The PATCH makes no sense if the client is not found under this API key. The cart add itself will either work or return the real error. Add a guard:
+
+```typescript
+// After findClientById returns 404 — log and skip PATCH:
+if (!existingShipping) {
+  const foundInApi = clientCheckResponse.status !== 404;
+  if (!foundInApi) {
+    logWarn(`[${requestId}] Step 1: Client not found in API key scope — skipping PATCH, proceeding to cart add`);
+    // Don't attempt PATCH — it will 400/403 with wrong scope
+  } else {
+    // ... existing PATCH code
+  }
+}
+```
+
+#### Fix 3: Add detailed error logging for the cart POST (Step 2) when it returns 400
+
+Currently when cart returns 400, `lastCartError` captures the text but it's not logged with enough detail to know if it's "strain not found" vs "client not found" vs something else. Enable `enableDetailedLogging = true` on the cart POST in `create-order` (line 3311) to get the full API-DEBUG output in logs.
+
+This is already set to `true` at line 3311:
+```typescript
+const cartResponse = await drGreenRequestBody("/dapp/carts", "POST", itemPayload, true, adminEnvConfig);
+```
+
+So detailed logs ARE being emitted — but the edge function logs panel is not showing recent ones. This means the **function deployment from the last session did not stick**. The currently deployed version may be an older one.
+
+---
+
+### Summary of Changes
 
 | File | Lines | Change |
 |------|-------|--------|
-| `supabase/functions/drgreen-proxy/index.ts` | 3107-3108 | Replace `drGreenRequestQuery(/dapp/clients/:id)` with `findClientById()` |
-| `supabase/functions/drgreen-proxy/index.ts` | 3184-3189 | Replace PATCH response trust with `findClientById()` re-verification |
-| `supabase/functions/drgreen-proxy/index.ts` | 3225 | Increase shipping wait: 0ms if verified, 2s if existed, 5s if unconfirmed |
-| `supabase/functions/drgreen-proxy/index.ts` | 2964-2966 | Fix `add-to-cart` standalone payload to flat format |
-| `supabase/functions/drgreen-proxy/index.test.ts` | Test 1 | Update to assert flat format for `add-to-cart` |
+| `supabase/functions/drgreen-proxy/index.ts` | 3142–3153 | Unwrap `shippingPayload` — send flat fields directly, not nested under `shipping` key |
+| `supabase/functions/drgreen-proxy/index.ts` | 3138 | Add guard: if `findClientById` returns 404, skip PATCH entirely |
+| `supabase/functions/drgreen-proxy/index.ts` | 3311 | Already `enableDetailedLogging: true` — confirm redeploy registers new logs |
+
+The test file does not need changes. The core fix is the PATCH payload shape — the nested `{ shipping: { ... } }` wrapper is being silently ignored by the Dr. Green PATCH endpoint, meaning shipping never actually gets saved on their side, which is why every order after a PATCH hits "shipping address not found" on the cart add.
 
 ---
 
-## Why This Will Work
+### Expected Order Flow After Fix
 
-The core loop has been: PATCH fires → response doesn't confirm shipping → code proceeds immediately → Dr. Green rejects cart add with "shipping not found" → shipping error displayed.
-
-With the fix:
-1. `findClientById()` pre-check correctly determines whether shipping exists (no more 401)
-2. After PATCH 200, re-fetch confirms shipping is live on Dr. Green side
-3. If confirmed: no wait needed, cart add proceeds with verified shipping
-4. If not confirmed: 5s wait gives the API more propagation time
-
-The cart payload format in `create-order` is already correct (flat `{ clientId, strainId, quantity }`). The only secondary fix needed is the standalone `add-to-cart` case.
-
----
-
-## Technical Note: No Frontend Changes Required
-
-The `Checkout.tsx` correctly passes `shippingAddress` with `address1`, `city`, `postalCode`, `countryCode`. The DB record for `a4357132` shows the correct address. The fix is purely in the edge function.
+1. `findClientById` → Benjamin found (or 404 if wrong scope)
+2. If found and no shipping: `PATCH /dapp/clients/{clientId}` with **flat** `{ address1, city, ... }` → 200
+3. Re-fetch to verify → shipping now visible
+4. Cart cleared → `DELETE /dapp/carts/client/{clientId}`
+5. `POST /dapp/carts` with `{ clientId, strainId: "7a268bf3...", quantity: 1 }` → 201
+6. `POST /dapp/orders` with `{ clientId }` → returns real Dr. Green order ID
+7. DB updated with `sync_status: synced`
