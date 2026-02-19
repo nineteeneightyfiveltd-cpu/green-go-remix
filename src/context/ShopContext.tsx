@@ -312,12 +312,46 @@ export function ShopProvider({ children }: { children: React.ReactNode }) {
               });
           }
 
+          // Resolve shipping address: prefer DApp live data, fall back to local DB
+          const liveShipping = liveData.shippings?.[0] || liveData.shipping || null;
+          const resolvedShipping = (() => {
+            if (liveShipping?.address1) {
+              return {
+                address1: liveShipping.address1 || liveShipping.addressLine1 || '',
+                address2: liveShipping.address2 || liveShipping.addressLine2 || '',
+                city: liveShipping.city || '',
+                state: liveShipping.state || liveShipping.city || '',
+                postalCode: liveShipping.postalCode || liveShipping.zipCode || '',
+                country: liveShipping.country || '',
+                countryCode: liveShipping.countryCode || localRecord.country_code || 'ZA',
+                landmark: liveShipping.landmark || '',
+              };
+            }
+            // Fall back to local DB shipping_address
+            return localRecord.shipping_address || null;
+          })();
+
+          // If DApp has richer address than local DB, persist it
+          const localAddr = localRecord.shipping_address as Record<string, unknown> | null;
+          const resolvedAddr = resolvedShipping as Record<string, unknown> | null;
+          if (resolvedAddr?.address1 && !localAddr?.address1) {
+            supabase
+              .from('drgreen_clients')
+              .update({ shipping_address: resolvedShipping, updated_at: new Date().toISOString() })
+              .eq('user_id', user.id)
+              .then(({ error: addrErr }) => {
+                if (addrErr) console.warn('[ShopContext] Could not persist shipping address:', addrErr);
+                else console.log('[ShopContext] Persisted shipping address from DApp to local DB');
+              });
+          }
+
           // Always use live data for the UI state
           setDrGreenClient({
             ...localRecord,
             is_kyc_verified: liveKyc,
             admin_approval: liveApproval,
             kyc_link: liveKycLink,
+            shipping_address: resolvedShipping,
           });
           setIsLoading(false);
           return;
