@@ -3111,6 +3111,9 @@ serve(async (req) => {
         let stepFailed = '';
         let lastStepError = '';
         let lastStepStatus = 0;
+        // clientCartId: the cart's own UUID from clientCart[0].id — required for POST /dapp/carts
+        // PHP reference: dappClientRefresh stores $jsonData['data']['clientCart'][0]['id'] as the cart ID
+        let clientCartId: string | null = null;
         
         // Step 1: Update client shipping address (if provided)
         // First check if client already has shipping on the API - skip if so
@@ -3144,6 +3147,16 @@ serve(async (req) => {
                 existingShipping = true;
                 shippingVerified = true;
               }
+              // Extract clientCartId from client record (PHP: clientCart[0].id = the cart UUID for POST /dapp/carts)
+              const cartArr = Array.isArray(innerClientData?.clientCart) ? innerClientData.clientCart as Record<string, unknown>[] : [];
+              if (cartArr.length > 0 && cartArr[0]?.id) {
+                clientCartId = cartArr[0].id as string;
+                logInfo(`[${requestId}] Step 1: Got clientCartId from client record`, {
+                  cartId: clientCartId.slice(0, 8) + '***',
+                });
+              } else {
+                logWarn(`[${requestId}] Step 1: clientCart[0].id not found in client record — cart add will use fallback`);
+              }
             }
           } catch (checkErr) {
             logWarn(`[${requestId}] Step 1: Client shipping check failed, will attempt PATCH`, { error: String(checkErr).slice(0, 100) });
@@ -3161,9 +3174,9 @@ serve(async (req) => {
             const addr = orderData.shippingAddress;
             // Always normalise countryCode to Alpha-3 before sending to Dr. Green API
             const normalisedCountryCode = toAlpha3(addr.countryCode) || toAlpha3(addr.country) || 'ZAF';
-            // FIX: PATCH /dapp/clients/:id expects shipping fields FLAT at top level (NOT nested under 'shipping' key).
-            // The CREATE client uses { shipping: { ... } } but PATCH ignores the wrapper silently.
-            const shippingPayload = {
+            // PHP reference (dappClientRefresh / create client): shipping is ALWAYS nested under a 'shipping' key.
+            // The flat format was tried before but silently failed — live API confirms address remains blank.
+            const shippingInner = {
               address1: addr.street || addr.address1 || '',
               address2: addr.address2 || '',
               landmark: addr.landmark || '',
@@ -3173,12 +3186,13 @@ serve(async (req) => {
               countryCode: normalisedCountryCode,
               postalCode: addr.zipCode || addr.postalCode || '',
             };
+            const shippingPayload = { shipping: shippingInner };
             
             if (clientFoundInApiScope) {
-              logInfo(`[${requestId}] Step 1: Updating client shipping address`, { 
+              logInfo(`[${requestId}] Step 1: Updating client shipping address (nested wrapper)`, { 
                 city: addr.city, 
                 country: addr.country,
-                payloadKeys: Object.keys(shippingPayload),
+                payloadKeys: Object.keys(shippingInner),
               });
               
               try {
@@ -3190,7 +3204,7 @@ serve(async (req) => {
                     errorBody: shippingError.slice(0, 500),
                   });
                   
-                  // PUT retry fallback with same flat payload
+                  // PUT retry fallback with same nested payload
                   logInfo(`[${requestId}] Step 1: Retrying shipping update with PUT method`);
                   try {
                     const putResponse = await drGreenRequestBody(`/dapp/clients/${clientId}`, "PUT", shippingPayload, true, adminEnvConfig);
@@ -3281,22 +3295,26 @@ serve(async (req) => {
         }
         
         // Step 1.5: Clear any stale cart to prevent 409 conflicts
-        // Correct endpoint: DELETE /dapp/carts/client/{clientId} — wipes ENTIRE cart for a client
-        // (NOT /dapp/carts/{cartItemId} which only deletes a single cart item by its UUID)
-        logInfo(`[${requestId}] Step 1.5: Clearing existing cart to prevent 409 conflict`);
+        // PHP reference (dappEmptyBasket): DELETE /dapp/carts/{cartUUID} with body { cartId: cartUUID }
+        // The cart UUID comes from clientCart[0].id (extracted above as clientCartId)
+        logInfo(`[${requestId}] Step 1.5: Clearing existing cart to prevent 409 conflict`, { hasCartId: !!clientCartId });
         try {
-          const emptyCartResponse = await drGreenRequest(`/dapp/carts/client/${clientId}`, "DELETE", undefined, adminEnvConfig);
-          logInfo(`[${requestId}] Step 1.5: Cart clear result`, { status: emptyCartResponse.status });
-          if (emptyCartResponse.status === 404) {
-            logInfo(`[${requestId}] Step 1.5: No existing cart found (404), proceeding`);
+          if (clientCartId) {
+            // PHP-confirmed correct endpoint: DELETE /dapp/carts/{cartUUID} with { cartId } body
+            const emptyCartResponse = await drGreenRequestBody(`/dapp/carts/${clientCartId}`, "DELETE", { cartId: clientCartId }, false, adminEnvConfig);
+            logInfo(`[${requestId}] Step 1.5: Cart clear result (cart UUID path)`, { status: emptyCartResponse.status });
+          } else {
+            // Fallback if clientCartId not found — try the client-based path
+            const emptyCartResponse = await drGreenRequest(`/dapp/carts/client/${clientId}`, "DELETE", undefined, adminEnvConfig);
+            logInfo(`[${requestId}] Step 1.5: Cart clear result (client fallback path)`, { status: emptyCartResponse.status });
           }
         } catch (clearErr) {
           logWarn(`[${requestId}] Step 1.5: Cart clear failed (non-blocking)`, { error: String(clearErr).slice(0, 100) });
         }
-        await sleep(1000); // Increased from 500ms — give API time to process cart deletion
+        await sleep(1000); // Give API time to process cart deletion
         
         // Step 2: Add items to server-side cart INDIVIDUALLY
-        // API: POST /dapp/carts with { clientId, strainId, quantity } per item
+        // PHP reference (dappAddToBasket): POST /dapp/carts with { items: [{ strainId, quantity }], clientCartId }
         const cartItems = orderData.items.map((item: { strainId?: string; productId?: string; quantity: number; price?: number }) => ({
           strainId: item.strainId || item.productId,
           quantity: item.quantity,
@@ -3319,11 +3337,11 @@ serve(async (req) => {
           
           for (let i = 0; i < cartItems.length; i++) {
             const item = cartItems[i];
-          // Flat format required by Dr. Green API: POST /dapp/carts { clientId, strainId, quantity }
+          // PHP-confirmed format (dappAddToBasket): POST /dapp/carts { items: [{ strainId, quantity }], clientCartId }
+          // clientCartId = cart's own UUID from clientCart[0].id — NOT the client's UUID
           const itemPayload = {
-              clientId: clientId,
-              strainId: item.strainId,
-              quantity: item.quantity,
+              items: [{ strainId: item.strainId, quantity: item.quantity }],
+              clientCartId: clientCartId || clientId,
             };
             
             try {
@@ -3349,7 +3367,12 @@ serve(async (req) => {
                 if (lastCartStatus === 409 && cartAttempts < maxCartAttempts) {
                   logInfo(`[${requestId}] Step 2: 409 conflict on item ${i + 1} - clearing cart and retrying all`);
                   try {
-                    await drGreenRequest(`/dapp/carts/client/${clientId}`, "DELETE", undefined, adminEnvConfig);
+                    // PHP-confirmed: DELETE /dapp/carts/{cartUUID} or fallback to client path
+                    if (clientCartId) {
+                      await drGreenRequestBody(`/dapp/carts/${clientCartId}`, "DELETE", { cartId: clientCartId }, false, adminEnvConfig);
+                    } else {
+                      await drGreenRequest(`/dapp/carts/client/${clientId}`, "DELETE", undefined, adminEnvConfig);
+                    }
                   } catch (clearErr) {
                     logWarn(`[${requestId}] Step 2: Cart clear failed`, { error: String(clearErr).slice(0, 100) });
                   }
@@ -3468,21 +3491,24 @@ serve(async (req) => {
             previousStep: stepFailed,
           });
           
-          // Clear cart completely — use correct endpoint: DELETE /dapp/carts/client/{clientId}
+          // Clear cart completely — PHP-confirmed: DELETE /dapp/carts/{cartUUID} with { cartId } body
           try {
-            await drGreenRequest(`/dapp/carts/client/${clientId}`, "DELETE", undefined, adminEnvConfig);
+            if (clientCartId) {
+              await drGreenRequestBody(`/dapp/carts/${clientCartId}`, "DELETE", { cartId: clientCartId }, false, adminEnvConfig);
+            } else {
+              await drGreenRequest(`/dapp/carts/client/${clientId}`, "DELETE", undefined, adminEnvConfig);
+            }
           } catch (clearErr) {
             logWarn(`[${requestId}] Fallback: Cart clear failed`, { error: String(clearErr).slice(0, 100) });
           }
           await sleep(2000);
           
-          // Re-add all items individually
+          // Re-add all items individually — PHP-confirmed format: { items: [{ strainId, quantity }], clientCartId }
           let fallbackAllAdded = true;
           for (let i = 0; i < cartItems.length; i++) {
             const item = cartItems[i];
             try {
-              // Flat format required by Dr. Green API: POST /dapp/carts { clientId, strainId, quantity }
-              const itemPayload = { clientId: clientId, strainId: item.strainId, quantity: item.quantity };
+              const itemPayload = { items: [{ strainId: item.strainId, quantity: item.quantity }], clientCartId: clientCartId || clientId };
               const resp = await drGreenRequestBody("/dapp/carts", "POST", itemPayload, true, adminEnvConfig);
               if (!resp.ok) {
                 const errText = await resp.clone().text();
