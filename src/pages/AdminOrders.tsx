@@ -4,7 +4,7 @@
  * Dashboard for viewing and syncing orders with Dr. Green API.
  */
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import AdminLayout from "@/layout/AdminLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -79,36 +79,49 @@ const AdminOrders = () => {
     setOrders(initialOrders);
   }, [initialOrders]);
 
-  // Filter orders when tab, search, or date range changes
-  const handleFilterChange = useCallback(async () => {
+  // Stable ref to fetchOrders — avoids re-render loops from function reference changes
+  const fetchOrdersRef = useRef(fetchOrders);
+  fetchOrdersRef.current = fetchOrders;
+
+  // Filter orders when tab changes (immediate)
+  useEffect(() => {
+    let cancelled = false;
     setIsFiltering(true);
-    try {
+    const filters: OrderFilters = {
+      syncStatus: activeTab,
+      search: searchQuery || undefined,
+      dateFrom: dateFrom || undefined,
+      dateTo: dateTo ? `${dateTo}T23:59:59.999Z` : undefined,
+    };
+    fetchOrdersRef.current(filters)
+      .then((result) => { if (!cancelled) setOrders(result.orders); })
+      .catch((err) => console.error("Error filtering orders:", err))
+      .finally(() => { if (!cancelled) setIsFiltering(false); });
+    return () => { cancelled = true; };
+  // Only primitive deps — no function references
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  // Debounced search and date filter
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setIsFiltering(true);
       const filters: OrderFilters = {
         syncStatus: activeTab,
         search: searchQuery || undefined,
         dateFrom: dateFrom || undefined,
         dateTo: dateTo ? `${dateTo}T23:59:59.999Z` : undefined,
       };
-      const result = await fetchOrders(filters);
-      setOrders(result.orders);
-    } catch (error) {
-      console.error("Error filtering orders:", error);
-    } finally {
-      setIsFiltering(false);
-    }
-  }, [activeTab, searchQuery, dateFrom, dateTo, fetchOrders]);
-
-  useEffect(() => {
-    handleFilterChange();
-  }, [activeTab, handleFilterChange]);
-
-  // Debounced search and date filter
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      handleFilterChange();
+      fetchOrdersRef.current(filters)
+        .then((result) => { if (!cancelled) setOrders(result.orders); })
+        .catch((err) => console.error("Error filtering orders:", err))
+        .finally(() => { if (!cancelled) setIsFiltering(false); });
     }, 300);
-    return () => clearTimeout(timer);
-  }, [searchQuery, dateFrom, dateTo, handleFilterChange]);
+    return () => { cancelled = true; clearTimeout(timer); };
+  // Only primitive deps — no function references
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery, dateFrom, dateTo]);
 
   // Set up realtime subscription
   useEffect(() => {
