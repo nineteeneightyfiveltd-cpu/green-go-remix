@@ -1,69 +1,91 @@
 
-## Fix: Consistent Currency Display Across All Pages and Admin
+## Fix: Shipping Address Form — Separate Display from Edit
 
-### Root Cause Analysis
+### What's Happening Now
 
-The screenshot shows "R 10,00" (ZAR) in the patient dashboard cart — this is actually **correct** for this user (South Africa). The system-wide currency problem is not about the patient cart but about:
+In checkout's "custom" address mode, the form is rendered with `initialAddress={savedAddress}`, which pre-fills every input field with the user's real address data as **editable values**. This means the user sees their actual address details inside the form fields, which feels like the placeholder text is their personal data — because it is.
 
-1. **Admin pages hardcode `'ZA'`** as the country in every `formatPrice()` call, ignoring the order's own `country_code`.
-2. **Admin "Total Sales" KPI** renders in ZAR regardless of context.
-3. **Strain price in Admin Strains table** always shows ZAR (R) even when the admin may be operating in a different region.
-4. **ApiComparisonDashboard** always renders prices as ZAR.
-5. **AdminOrderDetail** uses `order.country_code || 'ZA'` which is already correct but has no label to indicate the currency being shown.
+The user's expectation is:
+- Show the existing address as a **read-only display card** above
+- The edit form below should have **empty fields with generic country-specific placeholder text**
+- User only touches the form if they want to change something
 
-The fix should make **order-related amounts always display in the currency of that order**, and **global admin KPIs use a clear currency indicator** (EUR, since the DApp API prices are denominated in EUR).
+### Root Cause
 
-### Changes
+In `src/pages/Checkout.tsx` line 637:
+```tsx
+<ShippingAddressForm
+  clientId={drGreenClient.drgreen_client_id}
+  initialAddress={savedAddress}   // <-- This pre-fills real data into fields
+  ...
+/>
+```
 
-#### 1. `src/pages/AdminDashboard.tsx` — Fix "Total Sales" KPI
+And in `ShippingAddressForm.tsx`, the `defaultValues` on the form use `initialAddress` to fill the inputs directly:
+```tsx
+defaultValues: {
+  address1: initialAddress?.address1 || '',   // real "10 Downing St" goes into the field
+  city: initialAddress?.city || '',
+  ...
+}
+```
 
-- The `dappTotalSales` value is a count (number of sales), not a monetary amount — confirmed by the `SalesSummary` interface in `SalesDashboard.tsx` which only has `ONGOING`, `LEADS`, `CLOSED`, `totalCount`.
-- **Action**: Change `formatPrice(stats?.dappTotalSales || 0, 'ZA')` to simply display the number, or if it is a monetary value, use `'EUR'` (the API's base currency) with a label "EUR (DApp base)".
+### Fix
 
-#### 2. `src/components/admin/AdminOrdersTable.tsx` — Fix per-order currency
+#### 1. `src/pages/Checkout.tsx` — Remove `initialAddress` from "Ship to different address" form
 
-Currently: `formatPrice(order.total_amount ?? 0, order.country_code || 'ZA')`
+When the user clicks "Ship to a different address", the form should open **blank** (with generic placeholders) rather than pre-filled with the saved address. The saved address is already shown in the read-only card above it.
 
-This is already nearly correct — `order.country_code` is used when available. No change needed here, but we need to confirm the fallback is `DEFAULT_COUNTRY` (from `countries.ts`) rather than the hardcoded string `'ZA'`.
+Change line 637:
+```tsx
+// BEFORE
+initialAddress={savedAddress}
 
-- Replace `|| 'ZA'` with `|| DEFAULT_COUNTRY` imported from `@/lib/countries`.
+// AFTER — no initialAddress, just set defaultCountry from saved address
+initialAddress={null}
+defaultCountry={savedAddress?.countryCode || drGreenClient.country_code || countryCode}
+```
 
-#### 3. `src/components/admin/AdminOrderDetail.tsx` — Fix per-order currency
+This means:
+- Form fields start empty with generic placeholder hints (e.g. "10 Downing Street" for GB, "Rua Augusta 100" for PT)
+- User types their new address entirely
+- On save, the new address replaces the old one
 
-Same pattern: replace `|| 'ZA'` fallback with `|| DEFAULT_COUNTRY` from countries.ts.
+#### 2. `src/components/shop/ShippingAddressForm.tsx` — Make placeholders truly generic
 
-#### 4. `src/pages/AdminStrains.tsx` — Fix strain price display
+The current placeholders (e.g. "10 Downing Street", "Rua Augusta 100") are specific addresses that could be mistaken for real pre-filled data. Replace them with clearly descriptive, format-hint placeholders:
 
-Strain prices from the DApp API are denominated in **EUR**. Showing them as ZAR/R is misleading.
+| Field | Current (GB) | New (GB) |
+|---|---|---|
+| address1 | "10 Downing Street" | "e.g. 12 High Street" |
+| address2 | "Flat 2A" | "e.g. Flat 2A (optional)" |
+| city | "London" | "e.g. London" |
+| state | "England" | "e.g. Surrey" |
+| landmark | "Near Westminster" | "e.g. near the post office" |
 
-- Change `formatPrice(strain.retail_price, 'ZA')` to `formatPrice(strain.retail_price, 'EUR')` with a small "EUR" label, since strain base prices are API EUR amounts.
-- Add a column header indicator: "Price (EUR)" instead of just "Price".
+| Field | Current (PT) | New (PT) |
+|---|---|---|
+| address1 | "Rua Augusta 100" | "ex. Rua das Flores, 25" |
+| city | "Lisboa" | "ex. Lisboa" |
+| state | "Lisboa" | "ex. Setúbal" |
 
-#### 5. `src/components/admin/ApiComparisonDashboard.tsx` — Fix comparison prices
+| Field | Current (ZA) | New (ZA) |
+|---|---|---|
+| address1 | "123 Rivonia Road" | "e.g. 45 Main Street" |
+| city | "Johannesburg" | "e.g. Cape Town" |
+| state | "Gauteng" | "e.g. Western Cape" |
 
-The comparison dashboard compares prices from multiple API environments. These should be shown in EUR (the DApp base currency), not ZAR.
+| Field | Current (TH) | New (TH) |
+|---|---|---|
+| address1 | "123 Sukhumvit Road" | "e.g. 88 Charoen Krung Rd" |
+| city | "Bangkok" | "e.g. Bangkok" |
+| state | "Krung Thep" | "e.g. Chiang Rai" |
 
-- Replace all `formatPrice(..., 'ZA')` → `formatPrice(..., 'EUR')` or display the raw EUR value with an "€" prefix.
+The postal code placeholder already uses the format pattern (e.g. "SW1A 1AA") which is perfect — no change needed there.
 
-#### 6. `src/pages/AdminDashboard.tsx` — Fix the order detail in the activity feed
-
-Activity feed detail: `formatPrice(o.total_amount ?? 0, o.country_code || 'ZA')` — replace `'ZA'` with `DEFAULT_COUNTRY`.
-
-### Technical Details
-
-**Files to edit:**
+### Files to Edit
 
 | File | Change |
 |---|---|
-| `src/pages/AdminDashboard.tsx` | Import `DEFAULT_COUNTRY` from `@/lib/countries`; replace hardcoded `'ZA'` fallbacks; fix "Total Sales" to show EUR or raw count |
-| `src/components/admin/AdminOrdersTable.tsx` | Import `DEFAULT_COUNTRY`; replace `\|\| 'ZA'` with `\|\| DEFAULT_COUNTRY` |
-| `src/components/admin/AdminOrderDetail.tsx` | Import `DEFAULT_COUNTRY`; replace `\|\| 'ZA'` with `\|\| DEFAULT_COUNTRY` |
-| `src/pages/AdminStrains.tsx` | Change strain price column to display EUR; update column header to "Price (EUR)" |
-| `src/components/admin/ApiComparisonDashboard.tsx` | Replace `formatPrice(..., 'ZA')` → `formatPrice(..., 'EUR')` |
-
-**Key principle applied:**
-- Order amounts → use order's own `country_code` (with `DEFAULT_COUNTRY` as fallback, not raw `'ZA'`)
-- Strain/product base prices → always EUR (DApp API denomination)
-- Global totals/KPIs → EUR with clear label, or unitless counts
-
-This ensures the currency always accurately reflects either the order's jurisdiction or the API's base denomination, and no hardcoded `'ZA'` survives in the codebase.
+| `src/components/shop/ShippingAddressForm.tsx` | Update all `countryPlaceholders` to use generic descriptive hints prefixed with "e.g." / "ex." instead of real-looking addresses |
+| `src/pages/Checkout.tsx` | Remove `initialAddress={savedAddress}` from the "Ship to different address" `ShippingAddressForm` instance; keep `defaultCountry` set to the saved address country so locale-appropriate labels/placeholders still show |
