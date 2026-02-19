@@ -2444,8 +2444,8 @@ serve(async (req) => {
       }
       
       // User fetching their own client details (ownership verified via clientId match)
-      // This endpoint has SPECIAL HANDLING because Dr Green API may not allow regular users
-      // to access /dapp/clients/:clientId - we fall back to local data if API returns 401
+      // This endpoint has SPECIAL HANDLING to pull shipping from DApp API
+      // Strategy: 1) Try direct /dapp/clients/:id (has shippings[]), 2) fallback to list search, 3) local DB
       case "get-my-details": {
         const clientId = body.clientId || body.data?.clientId;
         if (!clientId) {
@@ -2455,54 +2455,74 @@ serve(async (req) => {
           throw new Error("Invalid client ID format");
         }
         
-        // First, get local client data from Supabase as fallback
-        // We use service role here because we've already verified ownership in the auth check above
+        // Always load local client as fallback
         const supabaseAdmin = createClient(
           Deno.env.get('SUPABASE_URL')!,
           Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
         );
         
-        const { data: localClient, error: localError } = await supabaseAdmin
+        const { data: localClient } = await supabaseAdmin
           .from('drgreen_clients')
           .select('*')
           .eq('drgreen_client_id', clientId)
           .maybeSingle();
         
-        // Try to get fresh data from Dr. Green API
-        let apiResponse: Response | null = null;
         let apiData: Record<string, unknown> | null = null;
         
+        // Strategy 1: Try direct individual endpoint GET /dapp/clients/:clientId
+        // This endpoint returns full client data including shippings[] array
         try {
-          apiResponse = await findClientById(clientId, adminEnvConfig);
-          
-          if (apiResponse.ok) {
-            apiData = await apiResponse.json() as Record<string, unknown>;
-            logInfo("Got client details from Dr. Green API", { clientId });
-          } else if (apiResponse.status === 401 || apiResponse.status === 404) {
-            logInfo("Dr. Green API returned 401/404 for client details, using local fallback", { clientId, status: apiResponse.status });
-            // API credentials don't have access or client not found in paginated search - use local data
+          const directResponse = await drGreenRequestQuery(`/dapp/clients/${clientId}`, {}, false, adminEnvConfig);
+          if (directResponse.ok) {
+            const directData = await directResponse.json() as Record<string, unknown>;
+            logInfo("Got client details from direct endpoint", { clientId });
+            apiData = directData;
           } else {
-            logWarn("Dr. Green API error for client details", { 
-              status: apiResponse.status, 
-              clientId 
-            });
+            logInfo("Direct client endpoint returned non-200, trying list fallback", { clientId, status: directResponse.status });
           }
-        } catch (apiErr) {
-          logWarn("Failed to fetch from Dr. Green API, using local fallback", { 
-            error: apiErr instanceof Error ? apiErr.message : 'Unknown' 
+        } catch (directErr) {
+          logWarn("Direct client endpoint failed, trying list fallback", {
+            error: directErr instanceof Error ? directErr.message : 'Unknown'
           });
         }
-        
-        // If we have API data, normalize and return it
-        if (apiData) {
-          // Normalize shippings array to shipping object (API returns shippings[], frontend expects shipping{})
-          const innerData = apiData.data as Record<string, unknown> | undefined;
-          if (innerData && Array.isArray(innerData.shippings) && (innerData.shippings as unknown[]).length > 0) {
-            innerData.shipping = normalizeShippingObject((innerData.shippings as Record<string, unknown>[])[0]);
-          } else if (Array.isArray(apiData.shippings) && (apiData.shippings as unknown[]).length > 0) {
-            apiData.shipping = normalizeShippingObject((apiData.shippings as Record<string, unknown>[])[0]);
+
+        // Strategy 2: Fallback — find client via paginated list (list lacks shippings but has base data)
+        if (!apiData) {
+          try {
+            const listResponse = await findClientById(clientId, adminEnvConfig);
+            if (listResponse.ok) {
+              apiData = await listResponse.json() as Record<string, unknown>;
+              logInfo("Got client details from list fallback", { clientId });
+            } else {
+              logInfo("List fallback also failed, using local DB", { clientId, status: listResponse.status });
+            }
+          } catch (listErr) {
+            logWarn("List fallback failed", { error: listErr instanceof Error ? listErr.message : 'Unknown' });
           }
-          return new Response(JSON.stringify(apiData), {
+        }
+        
+        // Normalize shippings[] -> shipping{} in API data
+        if (apiData) {
+          const innerData = (apiData.data as Record<string, unknown> | undefined) || apiData;
+          if (Array.isArray(innerData.shippings) && (innerData.shippings as unknown[]).length > 0) {
+            innerData.shipping = normalizeShippingObject((innerData.shippings as Record<string, unknown>[])[0]);
+            logInfo("Normalized shippings[] to shipping{} from DApp API", { clientId });
+          }
+          // If API data has no shipping but local DB does, merge it in
+          if (!innerData.shipping && localClient?.shipping_address) {
+            const localShip = localClient.shipping_address as Record<string, unknown>;
+            if (localShip?.address1) {
+              innerData.shipping = normalizeShippingObject(localShip);
+              logInfo("Merged local DB shipping into API response", { clientId });
+            }
+          }
+          if (apiData.data) {
+            return new Response(JSON.stringify(apiData), {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
+          return new Response(JSON.stringify({ success: true, data: innerData }), {
             status: 200,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
