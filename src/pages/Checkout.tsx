@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, ShoppingBag, CreditCard, AlertCircle, Loader2, MapPin, Home, Building2 } from 'lucide-react';
+import { ArrowLeft, ShoppingBag, CreditCard, AlertCircle, Loader2, MapPin, Home, Building2, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
@@ -175,10 +175,52 @@ const Checkout = () => {
         return;
       }
 
-      // Priority 1: local DB (fast)
+      // Priority 1: Dr. Green API — always the source of truth for verified address data
+      try {
+        const result = await getClientDetails(drGreenClient.drgreen_client_id);
+
+        if (!result.error) {
+          const raw = result.data as Record<string, unknown> | null;
+          const shipping = extractShipping(raw);
+
+          if (shipping?.address1) {
+            // Full verified address from DApp — use it directly
+            console.log('[Checkout] Full shipping address from DApp API (source of truth):', {
+              city: (shipping as Record<string, unknown>).city,
+              hasAddress1: true,
+            });
+            const addr = shipping as unknown as ShippingAddress;
+            setSavedAddress(addr);
+            setShippingAddress(addr);
+            setNeedsShippingAddress(false);
+            setAddressMode('saved');
+            setIsLoadingAddress(false);
+            return;
+          }
+
+          // DApp responded but has no address — capture country hint for form pre-fill
+          const detectedCountry = resolveCountryFromDApp(raw) || drGreenClient.country_code || countryCode || 'ZA';
+          console.log('[Checkout] DApp has no shipping address — country hint:', detectedCountry);
+          if (shipping) {
+            setPartialAddress({
+              country: (shipping.country as string) || '',
+              countryCode: detectedCountry,
+            });
+          } else {
+            setPartialAddress({ countryCode: detectedCountry });
+          }
+          // Fall through: no address from DApp — try local DB as fallback before prompting user
+        } else {
+          console.warn('[Checkout] DApp API error:', result.error);
+        }
+      } catch (error) {
+        console.warn('[Checkout] DApp API fetch failed, falling back to local DB:', error);
+      }
+
+      // Priority 2: Local DB — offline/error fallback only
       const localShipping = drGreenClient.shipping_address;
       if (localShipping && (localShipping as Record<string, unknown>).address1) {
-        console.log('[Checkout] Using shipping address from local DB');
+        console.log('[Checkout] Using shipping address from local DB (fallback — DApp unavailable)');
         const addr = localShipping as unknown as ShippingAddress;
         setSavedAddress(addr);
         setShippingAddress(addr);
@@ -188,46 +230,10 @@ const Checkout = () => {
         return;
       }
 
-      // Priority 2: Dr. Green API
-      try {
-        const result = await getClientDetails(drGreenClient.drgreen_client_id);
-
-        if (result.error) {
-          console.warn('[Checkout] Could not fetch client details:', result.error);
-          setNeedsShippingAddress(true);
-        } else {
-          const raw = result.data as Record<string, unknown> | null;
-          const shipping = extractShipping(raw);
-
-          if (shipping?.address1) {
-            // Full address available — use it directly
-            console.log('[Checkout] Full shipping address from DApp:', shipping);
-            const addr = shipping as unknown as ShippingAddress;
-            setSavedAddress(addr);
-            setShippingAddress(addr);
-            setNeedsShippingAddress(false);
-            setAddressMode('saved');
-          } else {
-            // No complete address — but capture partial data (country etc.) for auto-fill hint
-            const detectedCountry = resolveCountryFromDApp(raw) || drGreenClient.country_code || countryCode || 'ZA';
-            console.log('[Checkout] No full shipping address — partial country hint:', detectedCountry);
-            if (shipping) {
-              setPartialAddress({
-                country: (shipping.country as string) || '',
-                countryCode: detectedCountry,
-              });
-            } else {
-              setPartialAddress({ countryCode: detectedCountry });
-            }
-            setNeedsShippingAddress(true);
-          }
-        }
-      } catch (error) {
-        console.error('[Checkout] Failed to fetch client details:', error);
-        setNeedsShippingAddress(true);
-      } finally {
-        setIsLoadingAddress(false);
-      }
+      // Priority 3: No address found — prompt user to enter one
+      console.log('[Checkout] No shipping address found — prompting user');
+      setNeedsShippingAddress(true);
+      setIsLoadingAddress(false);
     };
 
     checkShippingAddress();
@@ -695,6 +701,17 @@ const Checkout = () => {
                           )}
                         </CardContent>
                       </Card>
+
+                      {/* Address saved confirmation banner */}
+                      {addressManuallySaved && (
+                        <Alert className="border-primary/30 bg-primary/5">
+                          <Check className="h-4 w-4 text-primary" />
+                          <AlertTitle className="text-primary">Address Saved</AlertTitle>
+                          <AlertDescription className="text-muted-foreground">
+                            Your delivery address has been confirmed.
+                          </AlertDescription>
+                        </Alert>
+                      )}
 
                       {/* Payment Card */}
                       <Card className="bg-card/50 backdrop-blur-sm border-border/50">

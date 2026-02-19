@@ -263,12 +263,15 @@ export function ShippingAddressForm({
         console.warn('Local DB address save failed:', localError);
       }
 
-      // Always succeed and pass address to checkout
+      // Always succeed — show confirmation before unmounting the form
       setSaveSuccess(true);
       toast({
         title: 'Address Confirmed',
         description: 'Your shipping address is ready for checkout.',
       });
+
+      // Brief pause so user sees the "Saved!" checkmark before the form disappears
+      await new Promise(resolve => setTimeout(resolve, 1200));
 
       console.log('[ShippingAddressForm] Calling onSuccess with:', shippingData);
       onSuccess?.(shippingData);
