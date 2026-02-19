@@ -3110,11 +3110,17 @@ serve(async (req) => {
               const clientData = await clientCheckResponse.clone().json();
               const innerClientData = clientData?.data || clientData;
               // Check both singular 'shipping' and plural 'shippings[]' — DApp returns either shape
-              const singularShipping = innerClientData?.shipping;
+              // Strictly require non-empty address1 — empty shipping objects (country/currency only) must NOT count
+              const singularShipping = innerClientData?.shipping as Record<string, unknown> | null;
               const pluralShipping = Array.isArray(innerClientData?.shippings)
-                ? (innerClientData.shippings as Record<string, unknown>[]).find((s) => s?.address1)
+                ? (innerClientData.shippings as Record<string, unknown>[]).find(
+                    (s) => s?.address1 && String(s.address1).trim().length > 0
+                  )
                 : null;
-              const shipping = singularShipping?.address1 ? singularShipping : pluralShipping;
+              const shipping =
+                singularShipping?.address1 && String(singularShipping.address1).trim().length > 0
+                  ? singularShipping
+                  : pluralShipping;
               if (shipping?.address1) {
                 logInfo(`[${requestId}] Step 1: Client has shipping on DApp (singular or shippings[])`, {
                   city: shipping.city,
@@ -3260,9 +3266,11 @@ serve(async (req) => {
           
           for (let i = 0; i < cartItems.length; i++) {
             const item = cartItems[i];
+          // Flat format per API spec: POST /dapp/carts { clientId, strainId, quantity }
           const itemPayload = {
-              clientCartId: clientId,
-              items: [{ strainId: item.strainId, quantity: item.quantity }],
+              clientId: clientId,
+              strainId: item.strainId,
+              quantity: item.quantity,
             };
             
             try {
@@ -3418,7 +3426,8 @@ serve(async (req) => {
           for (let i = 0; i < cartItems.length; i++) {
             const item = cartItems[i];
             try {
-              const itemPayload = { clientCartId: clientId, items: [{ strainId: item.strainId, quantity: item.quantity }] };
+              // Flat format per API spec: POST /dapp/carts { clientId, strainId, quantity }
+              const itemPayload = { clientId: clientId, strainId: item.strainId, quantity: item.quantity };
               const resp = await drGreenRequestBody("/dapp/carts", "POST", itemPayload, true, adminEnvConfig);
               if (!resp.ok) {
                 const errText = await resp.clone().text();
