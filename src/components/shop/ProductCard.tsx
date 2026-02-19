@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { ShoppingCart, Eye, Leaf, Droplets, Lock, AlertCircle, Cloud, Database, Zap, Moon, Brain, Smile, Heart, Sun, Wind, Minus, Plus } from 'lucide-react';
+import { ShoppingCart, Eye, Leaf, Droplets, Lock, AlertCircle, Cloud, Database, Zap, Moon, Brain, Smile, Heart, Sun, Wind, Minus, Plus, Check, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useShop } from '@/context/ShopContext';
 import { Product, DataSource } from '@/hooks/useProducts';
@@ -56,12 +56,14 @@ export function ProductCard({ product, onViewDetails, showDataSource = false }: 
   const isMobile = useIsMobile();
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isHovered, setIsHovered] = useState(false);
+  const [isAdding, setIsAdding] = useState(false);
+  const [addedSuccess, setAddedSuccess] = useState(false);
 
   const hasVideo = !!product.videoUrl;
 
   const [quantity, setQuantity] = useState(1);
 
-  const handleAddToCart = () => {
+  const handleAddToCart = async () => {
     if (!drGreenClient) {
       toast({ title: t('eligibility.required'), description: t('eligibility.requiredDescription'), variant: "destructive" });
       navigate('/shop/register');
@@ -71,9 +73,18 @@ export function ProductCard({ product, onViewDetails, showDataSource = false }: 
       toast({ title: t('eligibility.pending'), description: t('eligibility.kycPending'), variant: "destructive" });
       return;
     }
-    addToCart({ strain_id: product.id, strain_name: product.name, quantity, unit_price: product.retailPrice });
-    toast({ title: "Added to cart", description: `${quantity}g of ${product.name} added to your cart.` });
-    setQuantity(1);
+
+    setIsAdding(true);
+    try {
+      await addToCart({ strain_id: product.id, strain_name: product.name, quantity, unit_price: product.retailPrice });
+      setAddedSuccess(true);
+      toast({ title: "Added to cart", description: `${quantity}g of ${product.name} added to your cart.` });
+      setQuantity(1);
+      // Reset success state after 2s
+      setTimeout(() => setAddedSuccess(false), 2000);
+    } finally {
+      setIsAdding(false);
+    }
   };
 
   const incrementQty = useCallback((e: React.MouseEvent) => {
@@ -113,6 +124,8 @@ export function ProductCard({ product, onViewDetails, showDataSource = false }: 
     if (!product.availability) return (<><ShoppingCart className="mr-2 h-4 w-4" />{t('outOfStock')}</>);
     if (!drGreenClient) return (<><Lock className="mr-2 h-4 w-4" />Register to Buy</>);
     if (!isEligible) return (<><Lock className="mr-2 h-4 w-4" />Verification Required</>);
+    if (isAdding) return (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />Adding...</>);
+    if (addedSuccess) return (<><Check className="mr-2 h-4 w-4" />Added!</>);
     return (<><ShoppingCart className="mr-2 h-4 w-4" />{t('addToCart')}</>);
   };
 
@@ -262,8 +275,8 @@ export function ProductCard({ product, onViewDetails, showDataSource = false }: 
             </div>
             <Button
               className="flex-1 h-10 rounded-xl font-semibold transition-all duration-300 shadow-lg hover:shadow-xl text-sm"
-              disabled={!product.availability}
-              variant={!drGreenClient || !isEligible ? "secondary" : "default"}
+              disabled={!product.availability || isAdding}
+              variant={addedSuccess ? "default" : (!drGreenClient || !isEligible ? "secondary" : "default")}
               onClick={(e) => { e.stopPropagation(); handleAddToCart(); }}
             >
               {getButtonContent()}

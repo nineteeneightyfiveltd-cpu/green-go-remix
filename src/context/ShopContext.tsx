@@ -461,13 +461,17 @@ export function ShopProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
+    // Check if item already in cart so we can increment rather than overwrite
+    const existing = cart.find(c => c.strain_id === item.strain_id);
+    const newQuantity = existing ? existing.quantity + item.quantity : item.quantity;
+
     const { error } = await supabase
       .from('drgreen_cart')
       .upsert({
         user_id: user.id,
         strain_id: item.strain_id,
         strain_name: item.strain_name,
-        quantity: item.quantity,
+        quantity: newQuantity,
         unit_price: item.unit_price,
       }, {
         onConflict: 'user_id,strain_id',
@@ -484,10 +488,7 @@ export function ShopProvider({ children }: { children: React.ReactNode }) {
     }
 
     await fetchCart();
-    toast({
-      title: "Added to cart",
-      description: `${item.strain_name} added to your cart.`,
-    });
+    // Caller is responsible for showing success feedback — no toast here
   };
 
   const removeFromCart = async (strainId: string) => {
