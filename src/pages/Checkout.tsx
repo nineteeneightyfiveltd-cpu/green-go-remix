@@ -150,16 +150,25 @@ const Checkout = () => {
         
         if (result.error) {
           console.warn('Could not fetch client details from API:', result.error);
-          // Graceful fallback: prompt for address confirmation
           setNeedsShippingAddress(true);
-        } else if (result.data?.shipping && result.data.shipping.address1) {
-          const addr = result.data.shipping;
-          setSavedAddress(addr);
-          setShippingAddress(addr); // Use saved by default
-          setNeedsShippingAddress(false);
-          setAddressMode('saved');
         } else {
-          setNeedsShippingAddress(true);
+          // Proxy may return shipping at result.data.shipping (local fallback)
+          // or result.data.data.shipping (when wrapped by DApp API response envelope)
+          const raw = result.data as Record<string, unknown> | null;
+          const inner = (raw?.data as Record<string, unknown> | undefined) || raw;
+          const shipping = inner?.shipping as Record<string, unknown> | undefined;
+
+          if (shipping?.address1) {
+            console.log('[Checkout] Shipping pulled from DApp/local:', shipping);
+            const addr = shipping as unknown as ShippingAddress;
+            setSavedAddress(addr);
+            setShippingAddress(addr);
+            setNeedsShippingAddress(false);
+            setAddressMode('saved');
+          } else {
+            console.log('[Checkout] No shipping address found in client record, prompting user');
+            setNeedsShippingAddress(true);
+          }
         }
       } catch (error) {
         console.error('Failed to fetch client details:', error);
