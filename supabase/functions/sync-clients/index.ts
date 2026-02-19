@@ -317,9 +317,45 @@ serve(async (req) => {
             }
             totalSynced++;
         } else {
-            // Store unlinked client with null user_id — Dr. Green is source of truth
+          // Auto-provision auth account for unlinked client
+            let newUserId: string | null = null;
+            if (email) {
+              try {
+                const { data: newUser, error: createError } = await adminClient.auth.admin.createUser({
+                  email,
+                  password: '12345678',
+                  email_confirm: true,
+                });
+                if (!createError && newUser?.user) {
+                  newUserId = newUser.user.id;
+                  // Create profile
+                  await adminClient.from('profiles').upsert({
+                    id: newUserId,
+                    full_name: `${firstName} ${lastName}`.trim() || email,
+                    updated_at: new Date().toISOString(),
+                  }, { onConflict: 'id' });
+                  // Assign admin role for known admin emails
+                  const adminEmails = ['scott@healingbuds.global', 'healingbudsglobal@gmail.com'];
+                  if (adminEmails.includes(email.toLowerCase())) {
+                    await adminClient.from('user_roles').upsert(
+                      { user_id: newUserId, role: 'admin' },
+                      { onConflict: 'user_id,role', ignoreDuplicates: true }
+                    );
+                  }
+                  console.log(`[SyncClients] Provisioned auth account: ${email}`);
+                } else if (createError?.message?.includes('already been registered') || createError?.message?.includes('already exists')) {
+                  // Look up existing user
+                  const { data: { users: existingUsers } } = await adminClient.auth.admin.listUsers({ perPage: 1000 });
+                  const found = existingUsers.find(u => u.email?.toLowerCase() === email);
+                  if (found) newUserId = found.id;
+                }
+              } catch (provisionErr) {
+                console.warn(`[SyncClients] Could not provision ${email}:`, provisionErr);
+              }
+            }
+
             await adminClient.from('drgreen_clients').insert({
-              user_id: null as any,
+              user_id: newUserId as any,
               drgreen_client_id: clientId,
               is_kyc_verified: isKYCVerified,
               admin_approval: adminApproval,
