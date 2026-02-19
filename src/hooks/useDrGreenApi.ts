@@ -110,7 +110,7 @@ export function useDrGreenApi() {
       orderNumber?: string;
       status: string;
       totalAmount: number;
-    }>('create-order', { data: orderData });
+    }>('create-order', { data: orderData }, 'production');
   };
 
   // Create a payment for an order
@@ -124,7 +124,7 @@ export function useDrGreenApi() {
       paymentId: string;
       status: string;
       paymentUrl?: string;
-    }>('create-payment', { data: paymentData });
+    }>('create-payment', { data: paymentData }, 'production');
   };
 
   // Get payment status
@@ -134,7 +134,7 @@ export function useDrGreenApi() {
       status: 'PENDING' | 'PAID' | 'FAILED' | 'CANCELLED';
       amount: number;
       orderId: string;
-    }>('get-payment', { paymentId });
+    }>('get-payment', { paymentId }, 'production');
   };
 
   // Get order details
@@ -172,7 +172,7 @@ export function useDrGreenApi() {
       totalAmount: number;
       createdAt: string;
       paymentStatus: string;
-    }>>('get-orders', { clientId });
+    }>>('get-orders', { clientId }, 'production');
   };
 
   // Get strains by country (client-facing)
@@ -418,7 +418,7 @@ export function useDrGreenApi() {
     return callProxy<{ success: boolean; message?: string }>('update-shipping-address', { 
       clientId, 
       shipping 
-    });
+    }, 'production');
   };
 
   // Get client details including shipping address (for the logged-in user)
@@ -441,7 +441,7 @@ export function useDrGreenApi() {
         countryCode: string;
         postalCode: string;
       };
-    }>('get-my-details', { clientId });
+    }>('get-my-details', { clientId }, 'production');
   };
 
   // Admin: Update any client's shipping address (bypasses ownership check)
@@ -610,12 +610,12 @@ export function useDrGreenApi() {
     return callProxy<{
       success: boolean;
       cart?: { items: Array<{ strainId: string; quantity: number }> };
-    }>('add-to-cart', { data: cartData });
+    }>('add-to-cart', { data: cartData }, 'production');
   };
 
   // Empty the Dr. Green server-side cart
   const emptyCart = async (cartId: string) => {
-    return callProxy<{ success: boolean }>('empty-cart', { cartId });
+    return callProxy<{ success: boolean }>('empty-cart', { cartId }, 'production');
   };
 
   // Place order from server-side cart (uses body signing)
@@ -624,7 +624,7 @@ export function useDrGreenApi() {
       orderId: string;
       status: string;
       totalAmount: number;
-    }>('place-order', { data: orderData });
+    }>('place-order', { data: orderData }, 'production');
   };
 
   return {

@@ -160,6 +160,16 @@ const AdminSettings = () => {
       description="API environment configuration and connection management"
     >
       <div className="space-y-6 max-w-3xl">
+        {/* Safety Notice */}
+        <Card className="border-yellow-600/30 bg-yellow-50/50 dark:bg-yellow-900/10">
+          <CardContent className="p-4 flex items-start gap-3">
+            <span className="text-yellow-600 dark:text-yellow-400 mt-0.5 text-lg">⚠</span>
+            <p className="text-sm text-yellow-800 dark:text-yellow-300">
+              <strong>Admin Tools Only.</strong> The environment selector below applies exclusively to Admin Tools (API Test Runner, Comparison Dashboard). Patient checkout, cart, and order creation <strong>always use Production</strong> regardless of this setting.
+            </p>
+          </CardContent>
+        </Card>
+
         {/* Active Environment Badge */}
         <Card>
           <CardContent className="p-4 flex items-center justify-between">

@@ -1968,11 +1968,25 @@ serve(async (req) => {
     
     // Extract requested environment from body (supports production and railway)
     const requestedEnv = body?.env as string | undefined;
-    const envConfig = getEnvironment(requestedEnv);
+
+    // SAFETY GUARD: Patient-facing transactional actions ALWAYS use production,
+    // regardless of what env the admin selector has set in the browser.
+    const PATIENT_TRANSACTIONAL_ACTIONS = [
+      'create-order', 'add-to-cart', 'create-payment',
+      'get-payment', 'update-shipping-address', 'get-my-details',
+      'get-orders', 'empty-cart', 'place-order',
+    ];
+    const isTransactional = PATIENT_TRANSACTIONAL_ACTIONS.includes(action);
+    if (isTransactional && requestedEnv === 'railway') {
+      console.warn(`[drgreen-proxy] SAFETY: Forcing production for transactional action "${action}" (requested: railway)`);
+    }
+    const effectiveEnv = (isTransactional && requestedEnv === 'railway') ? 'production' : requestedEnv;
+
+    const envConfig = getEnvironment(effectiveEnv);
     // All actions use the same credentials per environment — no separate write keys
     const adminEnvConfig = envConfig; // Alias for backwards compatibility
     if (requestedEnv) {
-      console.log(`[drgreen-proxy] Using environment: ${envConfig.name} (${requestedEnv})`);
+      console.log(`[drgreen-proxy] Using environment: ${envConfig.name} (${effectiveEnv})`);
     }
     
     let response: Response;
