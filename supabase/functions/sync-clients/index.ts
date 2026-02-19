@@ -264,7 +264,20 @@ serve(async (req) => {
         const adminApproval = client.adminApproval as string || 'PENDING';
         const shippings = client.shippings as Array<{ country?: string }> || [];
         const phoneCountryCode = client.phoneCountryCode as string || '';
-        const countryCode = shippings[0]?.country || phoneCountryCode || 'PT';
+        const rawCountry = shippings[0]?.country || phoneCountryCode || 'ZA';
+        // Normalize to ISO Alpha-2
+        const countryNameMap: Record<string, string> = {
+          'South Africa': 'ZA', 'south africa': 'ZA', 'ZAF': 'ZA',
+          'United Kingdom': 'GB', 'UK': 'GB', 'GBR': 'GB',
+          'Portugal': 'PT', 'PRT': 'PT',
+          'Thailand': 'TH', 'THA': 'TH',
+          'Germany': 'DE', 'DEU': 'DE',
+          'United States': 'US', 'USA': 'US',
+          'France': 'FR', 'FRA': 'FR',
+          'Spain': 'ES', 'ESP': 'ES',
+          'Netherlands': 'NL', 'NLD': 'NL',
+        };
+        const countryCode = countryNameMap[rawCountry] || rawCountry;
 
         const { data: existing } = await adminClient
           .from('drgreen_clients').select('id, is_kyc_verified, admin_approval, user_id')
