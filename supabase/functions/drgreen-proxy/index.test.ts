@@ -13,44 +13,49 @@ import { assertEquals, assertFalse, assert } from "https://deno.land/std@0.224.0
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1: Cart payload MUST be flat format { clientId, strainId, quantity }
 // ─────────────────────────────────────────────────────────────────────────────
-Deno.test("cart payload uses flat format — clientId + strainId + quantity (per docs)", () => {
-  const clientId = "00000000-0000-0000-0000-000000000001";
+Deno.test("cart payload uses PHP-confirmed format — { items: [{ strainId, quantity }], clientCartId }", () => {
+  // PHP reference (dappAddToBasket):
+  //   $payload = [ 'items' => [['quantity' => $qty, 'strainId' => $strainId]], 'clientCartId' => $basketId ];
+  // clientCartId = cart UUID from clientCart[0].id — NOT the client's own UUID
+  const clientCartId = "b0a6ca40-cfb3-4d56-9a39-aa2e094d290e"; // cart UUID
   const strainId = "00000000-0000-0000-0000-000000000002";
   const quantity = 2;
 
-  // Simulate the correct cart payload builder (per DRGREEN-API-FULL-REFERENCE.md and DRGREEN_API_ENDPOINTS.md)
   const itemPayload = {
-    clientId: clientId,
-    strainId: strainId,
-    quantity: quantity,
+    items: [{ strainId, quantity }],
+    clientCartId,
   };
 
-  // Must contain the flat fields the Dr. Green API requires
+  // Must use clientCartId (cart UUID) at top level — PHP confirmed
   assert(
-    "clientId" in itemPayload,
-    "Payload MUST contain 'clientId' — required by Dr. Green API (flat format)"
-  );
-  assert(
-    "strainId" in itemPayload,
-    "Payload MUST contain 'strainId' — required by Dr. Green API (flat format)"
-  );
-  assert(
-    "quantity" in itemPayload,
-    "Payload MUST contain 'quantity' — required by Dr. Green API (flat format)"
-  );
-  assertFalse(
     "clientCartId" in itemPayload,
-    "Payload must NOT contain 'clientCartId' — that is the legacy unsupported format"
+    "Payload MUST contain 'clientCartId' — PHP dappAddToBasket confirms this is the cart UUID (clientCart[0].id)"
   );
-  assertFalse(
+  // Must use items[] array — PHP confirmed
+  assert(
     "items" in itemPayload,
-    "Payload must NOT contain 'items[]' — that is the legacy unsupported batch format"
+    "Payload MUST contain 'items[]' array — PHP: { items: [{ strainId, quantity }], clientCartId }"
+  );
+  // Must NOT use bare clientId — that field belongs to POST /dapp/orders only
+  assertFalse(
+    "clientId" in itemPayload,
+    "Payload must NOT contain bare 'clientId' — that is for POST /dapp/orders, not POST /dapp/carts"
+  );
+  // strainId must be INSIDE items[], not at top level
+  assertFalse(
+    "strainId" in itemPayload,
+    "Payload must NOT have 'strainId' at top level — it must be inside items[]: { items: [{ strainId, quantity }] }"
+  );
+  // quantity must be INSIDE items[], not at top level
+  assertFalse(
+    "quantity" in itemPayload,
+    "Payload must NOT have 'quantity' at top level — it must be inside items[]: { items: [{ strainId, quantity }] }"
   );
 
   // Validate values
-  assertEquals(itemPayload.clientId, clientId, "clientId must match");
-  assertEquals(itemPayload.strainId, strainId, "strainId must match");
-  assertEquals(itemPayload.quantity, quantity, "quantity must match");
+  assertEquals(itemPayload.clientCartId, clientCartId, "clientCartId must match the cart UUID");
+  assertEquals(itemPayload.items[0].strainId, strainId, "strainId must be inside items[0]");
+  assertEquals(itemPayload.items[0].quantity, quantity, "quantity must be inside items[0]");
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
