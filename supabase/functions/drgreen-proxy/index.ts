@@ -3136,85 +3136,96 @@ serve(async (req) => {
           }
 
           if (!existingShipping) {
+            // Guard: if findClientById returned 404, the client is not visible under this API key's scope.
+            // Attempting PATCH on an out-of-scope client returns 400/403 and is silently ignored.
+            // Skip PATCH in this case — proceed directly to cart add to surface the real error.
+            const clientFoundInApiScope = clientCheckResponse.status !== 404;
+            if (!clientFoundInApiScope) {
+              logWarn(`[${requestId}] Step 1: Client not found in API key scope (404) — skipping PATCH, proceeding to cart add`);
+            }
+
             const addr = orderData.shippingAddress;
-            // Fix 1: Always normalise countryCode to Alpha-3 before sending to Dr. Green API
+            // Always normalise countryCode to Alpha-3 before sending to Dr. Green API
             const normalisedCountryCode = toAlpha3(addr.countryCode) || toAlpha3(addr.country) || 'ZAF';
+            // FIX: PATCH /dapp/clients/:id expects shipping fields FLAT at top level (NOT nested under 'shipping' key).
+            // The CREATE client uses { shipping: { ... } } but PATCH ignores the wrapper silently.
             const shippingPayload = {
-              shipping: {
-                address1: addr.street || addr.address1 || '',
-                address2: addr.address2 || '',
-                landmark: addr.landmark || '',
-                city: addr.city || '',
-                state: addr.state || addr.city || '',
-                country: addr.country || '',
-                countryCode: normalisedCountryCode,
-                postalCode: addr.zipCode || addr.postalCode || '',
-              }
+              address1: addr.street || addr.address1 || '',
+              address2: addr.address2 || '',
+              landmark: addr.landmark || '',
+              city: addr.city || '',
+              state: addr.state || addr.city || '',
+              country: addr.country || '',
+              countryCode: normalisedCountryCode,
+              postalCode: addr.zipCode || addr.postalCode || '',
             };
             
-            logInfo(`[${requestId}] Step 1: Updating client shipping address`, { 
-              city: addr.city, 
-              country: addr.country 
-            });
-            
-            try {
-              const shippingResponse = await drGreenRequestBody(`/dapp/clients/${clientId}`, "PATCH", shippingPayload, false, adminEnvConfig);
-              if (!shippingResponse.ok) {
-                const shippingError = await shippingResponse.clone().text();
-                logWarn(`[${requestId}] Step 1: Shipping PATCH failed`, { 
-                  status: shippingResponse.status,
-                  errorBody: shippingError.slice(0, 500),
-                });
-                
-                // PUT retry fallback
-                logInfo(`[${requestId}] Step 1: Retrying shipping update with PUT method`);
-                try {
-                  const putResponse = await drGreenRequestBody(`/dapp/clients/${clientId}`, "PUT", shippingPayload, false, adminEnvConfig);
-                  if (putResponse.ok) {
-                    const putData = await putResponse.clone().json();
-                    const putShipping = putData?.data?.shipping || putData?.shipping;
-                    if (putShipping && putShipping.address1) {
-                      logInfo(`[${requestId}] Step 1: Shipping verified via PUT fallback`);
-                      shippingVerified = true;
-                    }
-                  } else {
-                    logWarn(`[${requestId}] Step 1: PUT fallback also failed`, { status: putResponse.status });
-                  }
-                } catch (putErr) {
-                  logWarn(`[${requestId}] Step 1: PUT fallback exception`, { error: String(putErr).slice(0, 200) });
-                }
-              } else {
-                // PATCH returned 200 — verify shipping was registered by re-fetching client
-                // (PATCH response does not echo back shipping fields, so we cannot trust it)
-                logInfo(`[${requestId}] Step 1: PATCH returned 200, verifying shipping was registered...`);
-                try {
-                  const verifyResponse = await findClientById(clientId, adminEnvConfig);
-                  if (verifyResponse.ok) {
-                    const verifyData = await verifyResponse.clone().json();
-                    const innerData = verifyData?.data || verifyData;
-                    const singularS = innerData?.shipping as Record<string, unknown> | null;
-                    const pluralS = Array.isArray(innerData?.shippings)
-                      ? (innerData.shippings as Record<string, unknown>[]).find(
-                          (s) => s?.address1 && String(s.address1).trim().length > 0
-                        )
-                      : null;
-                    const verifiedShipping =
-                      singularS?.address1 && String(singularS.address1).trim().length > 0
-                        ? singularS
-                        : pluralS;
-                    if (verifiedShipping?.address1) {
-                      logInfo(`[${requestId}] Step 1: Shipping CONFIRMED on Dr. Green side`, { city: verifiedShipping.city });
-                      shippingVerified = true;
+            if (clientFoundInApiScope) {
+              logInfo(`[${requestId}] Step 1: Updating client shipping address`, { 
+                city: addr.city, 
+                country: addr.country,
+                payloadKeys: Object.keys(shippingPayload),
+              });
+              
+              try {
+                const shippingResponse = await drGreenRequestBody(`/dapp/clients/${clientId}`, "PATCH", shippingPayload, true, adminEnvConfig);
+                if (!shippingResponse.ok) {
+                  const shippingError = await shippingResponse.clone().text();
+                  logWarn(`[${requestId}] Step 1: Shipping PATCH failed`, { 
+                    status: shippingResponse.status,
+                    errorBody: shippingError.slice(0, 500),
+                  });
+                  
+                  // PUT retry fallback with same flat payload
+                  logInfo(`[${requestId}] Step 1: Retrying shipping update with PUT method`);
+                  try {
+                    const putResponse = await drGreenRequestBody(`/dapp/clients/${clientId}`, "PUT", shippingPayload, true, adminEnvConfig);
+                    if (putResponse.ok) {
+                      const putData = await putResponse.clone().json();
+                      const putShipping = putData?.data?.shipping || putData?.shipping;
+                      if (putShipping && putShipping.address1) {
+                        logInfo(`[${requestId}] Step 1: Shipping verified via PUT fallback`);
+                        shippingVerified = true;
+                      }
                     } else {
-                      logWarn(`[${requestId}] Step 1: PATCH 200 but shipping NOT yet visible on Dr. Green — will wait`);
+                      logWarn(`[${requestId}] Step 1: PUT fallback also failed`, { status: putResponse.status });
                     }
+                  } catch (putErr) {
+                    logWarn(`[${requestId}] Step 1: PUT fallback exception`, { error: String(putErr).slice(0, 200) });
                   }
-                } catch (verifyErr) {
-                  logWarn(`[${requestId}] Step 1: Post-PATCH verify failed`, { error: String(verifyErr).slice(0, 100) });
+                } else {
+                  // PATCH returned 200 — verify shipping was registered by re-fetching client
+                  // (PATCH response does not echo back shipping fields, so we cannot trust it)
+                  logInfo(`[${requestId}] Step 1: PATCH returned 200, verifying shipping was registered...`);
+                  try {
+                    const verifyResponse = await findClientById(clientId, adminEnvConfig);
+                    if (verifyResponse.ok) {
+                      const verifyData = await verifyResponse.clone().json();
+                      const innerData = verifyData?.data || verifyData;
+                      const singularS = innerData?.shipping as Record<string, unknown> | null;
+                      const pluralS = Array.isArray(innerData?.shippings)
+                        ? (innerData.shippings as Record<string, unknown>[]).find(
+                            (s) => s?.address1 && String(s.address1).trim().length > 0
+                          )
+                        : null;
+                      const verifiedShipping =
+                        singularS?.address1 && String(singularS.address1).trim().length > 0
+                          ? singularS
+                          : pluralS;
+                      if (verifiedShipping?.address1) {
+                        logInfo(`[${requestId}] Step 1: Shipping CONFIRMED on Dr. Green side`, { city: verifiedShipping.city });
+                        shippingVerified = true;
+                      } else {
+                        logWarn(`[${requestId}] Step 1: PATCH 200 but shipping NOT yet visible on Dr. Green — will wait`);
+                      }
+                    }
+                  } catch (verifyErr) {
+                    logWarn(`[${requestId}] Step 1: Post-PATCH verify failed`, { error: String(verifyErr).slice(0, 100) });
+                  }
                 }
+              } catch (shippingErr) {
+                logWarn(`[${requestId}] Step 1: Shipping PATCH exception`, { error: String(shippingErr).slice(0, 100) });
               }
-            } catch (shippingErr) {
-              logWarn(`[${requestId}] Step 1: Shipping PATCH exception`, { error: String(shippingErr).slice(0, 100) });
             }
           }
           
