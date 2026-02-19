@@ -3077,6 +3077,18 @@ serve(async (req) => {
             retryable: false,
           }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 });
         }
+        // Server-side shipping validation — fail fast before any Dr. Green API calls
+        if (!orderData.shippingAddress || !String(orderData.shippingAddress.address1 ?? '').trim()) {
+          logWarn(`[${requestId}] create-order: Missing or empty shippingAddress.address1 — returning SHIPPING_ADDRESS_REQUIRED`);
+          return new Response(JSON.stringify({
+            success: false,
+            apiStatus: 400,
+            errorCode: 'SHIPPING_ADDRESS_REQUIRED',
+            message: 'A shipping address with a street address is required to place an order.',
+            requestId,
+            retryable: false,
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 });
+        }
         if (!orderData.items || !Array.isArray(orderData.items) || orderData.items.length === 0) {
           logWarn(`[${requestId}] create-order: Missing or empty items array`);
           return new Response(JSON.stringify({
@@ -3106,8 +3118,10 @@ serve(async (req) => {
           // Pre-check: fetch client to see if shipping already exists
           // NOTE: GET /dapp/clients/:id returns 401 — use findClientById() which paginates the list
           let existingShipping = false;
+          // SCOPE FIX: declare outside try block so it's accessible at the 404 guard below
+          let clientCheckResponse: Response | null = null;
           try {
-          const clientCheckResponse = await findClientById(clientId, adminEnvConfig);
+          clientCheckResponse = await findClientById(clientId, adminEnvConfig);
             if (clientCheckResponse.ok) {
               const clientData = await clientCheckResponse.clone().json();
               const innerClientData = clientData?.data || clientData;
@@ -3139,7 +3153,7 @@ serve(async (req) => {
             // Guard: if findClientById returned 404, the client is not visible under this API key's scope.
             // Attempting PATCH on an out-of-scope client returns 400/403 and is silently ignored.
             // Skip PATCH in this case — proceed directly to cart add to surface the real error.
-            const clientFoundInApiScope = clientCheckResponse.status !== 404;
+            const clientFoundInApiScope = clientCheckResponse?.status !== 404;
             if (!clientFoundInApiScope) {
               logWarn(`[${requestId}] Step 1: Client not found in API key scope (404) — skipping PATCH, proceeding to cart add`);
             }
@@ -3327,6 +3341,8 @@ serve(async (req) => {
                 logWarn(`[${requestId}] Step 2: Cart item ${i + 1} failed`, { 
                   status: cartResponse.status,
                   error: lastCartError.slice(0, 500),
+                  cartPayload: JSON.stringify(itemPayload),
+                  strainId: item.strainId,
                 });
                 
                 // On 409 Conflict, clear cart and retry full sequence
