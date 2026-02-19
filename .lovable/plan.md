@@ -1,204 +1,122 @@
 
-## Fix Plan: Order 400 Error + Infinite Re-render Loop + Product Skeleton
+## Root Cause: Wrong Environment Key Poisons All Order Calls
 
-### Three Confirmed Root Causes
+### What Is Actually Happening
 
-**Bug 1 — Wrong Cart Clear Endpoint (Causes Status 400 on Orders)**
+The logs show the error is not the cart endpoint URL — it is a key parsing failure that prevents any API call from being made at all:
 
-The Postman workspace and the API endpoint reference both confirm:
-- `DELETE /dapp/carts/{cartItemId}` — deletes ONE specific cart item by its item UUID
-- `DELETE /dapp/carts/client/{clientId}` — wipes the ENTIRE cart for a client
-
-The proxy currently calls `DELETE /dapp/carts/${clientId}` in **three places**. The Dr. Green client ID (e.g. `a4357132-7e8c-4c8a-b005-6f818b3f173e`) is NOT a cart item ID, so the API either 404s or ignores it silently. The cart is never cleared. When Step 2 then fires `POST /dapp/carts` with the new strain, the API finds a stale item already in the cart and returns **400** (duplicate/conflict).
-
-Locations in `drgreen-proxy/index.ts`:
-- Line 3167: Step 1.5 initial clear
-- Line 3228: 409 conflict retry clear
-- Line 3349: Fallback flow clear
-
-All three must change from `/dapp/carts/${clientId}` to `/dapp/carts/client/${clientId}`.
-
-**Bug 2 — Infinite Re-render Loop in Checkout (Causes Product Skeleton & Edge Function Flood)**
-
-In `src/pages/Checkout.tsx` line 241:
-```tsx
-useEffect(() => {
-  checkShippingAddress();
-}, [drGreenClient, getClientDetails, addressManuallySaved, countryCode]);
+```
+[Error] secp256k1: Failed to extract private key { error: "Error: Expected SEQUENCE" }
+[Error] Proxy error { message: "Failed to parse secp256k1 private key: Error: Expected SEQUENCE" }
 ```
 
-`getClientDetails` is a function created inside `useDrGreenApi()`. Every re-render creates a new function reference. React sees the dependency changed → runs the effect → sets state (`setSavedAddress`) → triggers re-render → new `getClientDetails` reference → runs effect again. Infinite loop.
+The decoded key is only **24 bytes** (`decodedLength: 24`). A valid secp256k1 private key requires 32 raw bytes minimum, or ~88 bytes for SEC1 DER format, or ~138 bytes for PKCS#8 DER. 24 bytes is not a parseable key structure.
 
-The console screenshots (image-3, image-4) confirm `[Checkout] Full shipping address from DApp API` firing dozens of times per second between 18:10:27 and 18:10:32. This floods the Edge Function with `get-my-details` calls, saturating cold-start capacity and starving the `get-strains-legacy` call — which is why products sit on a skeleton.
+### Why It Is Using the Wrong Key
 
-Fix: Remove `getClientDetails` and `countryCode` from deps. Depend only on `drGreenClient?.drgreen_client_id` and `addressManuallySaved`. Add a `hasFetchedAddressRef` to ensure the effect only runs once per mount, not once per render.
+The `ApiEnvironmentContext` stores the user-selected environment in `localStorage` under `hb-api-environment`. Admin settings let you switch between `production` and `railway`. 
 
-**Bug 3 — No Timeout on Product Fetch (Infinite Skeleton UX)**
+`useDrGreenApi.ts` line 39:
+```typescript
+const env = overrideEnv || getCurrentEnvironment(); // reads localStorage
+```
 
-`useProducts.ts` has no timeout. If the Edge Function is slow (due to Bug 2 flooding it) or cold-starting, `isLoading` stays `true` forever. Add a 15-second `Promise.race` timeout so the user gets a "Try Again" button instead of a stuck skeleton.
+Then line 42:
+```typescript
+body: { action, env, ...data }  // sends env: "railway" to proxy
+```
+
+The proxy line 379–382:
+```typescript
+railway: {
+  apiUrl: 'https://budstack-backend-main-development.up.railway.app/api/v1',
+  apiKeyEnv: 'DRGREEN_STAGING_API_KEY',
+  privateKeyEnv: 'DRGREEN_STAGING_PRIVATE_KEY',  // ← broken key, 24 bytes
+}
+```
+
+So when the browser has `railway` in localStorage (set by whoever last touched Admin Settings), **every** patient-facing action — including cart clear, cart add, and order creation — uses the staging private key. That key is corrupted/truncated and throws before even making an HTTP request to Dr. Green.
+
+The `sync-strains` function works because it is a separate Edge Function that reads `DRGREEN_API_KEY` + `DRGREEN_PRIVATE_KEY` directly, bypassing the environment selector entirely.
+
+### The Fix: Two-Layer Isolation
+
+**Layer 1 — Force `production` on all patient-facing proxy calls (the fast fix)**
+
+In `src/hooks/useDrGreenApi.ts`, the `callProxy` function currently passes whatever is in localStorage as `env`. Patient-facing actions (`create-order`, `add-to-cart`, `get-orders`, `create-payment`, `get-my-details`, `update-shipping`, etc.) must always run against `production` regardless of what the admin selector has set.
+
+Change: pass `overrideEnv: 'production'` as the third argument to `callProxy` for all non-admin actions. Admin comparison/testing tools can continue using the context value.
+
+**Layer 2 — Proxy-side guard: never use railway for order/cart/payment actions**
+
+In `supabase/functions/drgreen-proxy/index.ts`, add an explicit safeguard in the `create-order`, `add-to-cart`, and `create-payment` case blocks: if `requestedEnv === 'railway'`, override to `production` and log a warning. This means even if client-side code ever passes railway again, the proxy rejects it for transactional operations.
+
+**Layer 3 — Admin Settings UI: warn that railway is for admin tools only**
+
+In `src/pages/AdminSettings.tsx`, add a visible notice that the environment selector only affects Admin Tools (test runner, comparison dashboard) and has no effect on patient checkout or orders.
 
 ---
 
-### Postman Knowledge Applied
+### Files to Change
 
-From the Postman workspace screenshots and the Orders collection:
-
-**Create an Order** — `POST /dapp/orders`
-- Payload: `{ "clientId": "..." }` only — items must already be in the server-side cart
-- Response 201: `{ data: { id, status, createdAt, totalAmount } }`
-- Common 400 causes confirmed: cart not cleared before add, stale items, signature mismatch, inactive client
-
-**Cart operations** (confirmed by Postman):
-- Add item: `POST /dapp/carts` with `{ clientId, strainId, quantity }`
-- Clear client cart: `DELETE /dapp/carts/client/{clientId}` — this is the correct wipe endpoint
-- Delete single item: `DELETE /dapp/carts/{cartItemId}` — takes the cart ITEM UUID, not client UUID
-
-**Get All Cart Items** — `GET /dapp/carts?orderBy=desc&take=10&page=1&search=&searchBy=clientName`
-
-**Get All Orders** — `GET /dapp/orders?orderBy=desc&take=10&page=1&adminApproval=PENDING&clientIds=[]`
-
-The `clientIds=[]` as a literal empty array in the query string is a known 400 cause confirmed by Postman — the proxy should omit this param when empty.
+| File | Change |
+|---|---|
+| `src/hooks/useDrGreenApi.ts` | All patient-facing `callProxy` calls: pass `'production'` as `overrideEnv` explicitly. Only the admin comparison calls should read the context env. |
+| `supabase/functions/drgreen-proxy/index.ts` | In `create-order`, `add-to-cart`, `create-payment` case blocks: if `requestedEnv === 'railway'`, force `production` and log `[SECURITY] Forcing production for transactional action`. |
+| `src/pages/AdminSettings.tsx` | Add an info banner: "Environment selector applies to Admin Tools only. Patient checkout always uses Production." |
 
 ---
 
-### Fix Implementation
+### Technical Detail: useDrGreenApi.ts Changes
 
-#### File 1: `supabase/functions/drgreen-proxy/index.ts`
-
-**Change 1 — Line 3164 comment (cosmetic, for correctness):**
-Remove the wrong comment that says `Correct endpoint: DELETE /dapp/carts/{clientId}` — it is incorrect.
-
-**Change 2 — Line 3167 (Step 1.5):**
-```typescript
-// BEFORE (wrong — treats clientId as a cart item ID):
-const emptyCartResponse = await drGreenRequest(`/dapp/carts/${clientId}`, "DELETE", undefined, adminEnvConfig);
-
-// AFTER (correct — wipes entire cart for this client):
-const emptyCartResponse = await drGreenRequest(`/dapp/carts/client/${clientId}`, "DELETE", undefined, adminEnvConfig);
-```
-
-Increase the sleep after Step 1.5 from 500ms to 1000ms to give the API time to process the deletion.
-
-**Change 3 — Line 3228 (409 conflict retry):**
-```typescript
-// BEFORE:
-await drGreenRequest(`/dapp/carts/${clientId}`, "DELETE", undefined, adminEnvConfig);
-
-// AFTER:
-await drGreenRequest(`/dapp/carts/client/${clientId}`, "DELETE", undefined, adminEnvConfig);
-```
-
-**Change 4 — Line 3349 (fallback flow):**
-```typescript
-// BEFORE:
-await drGreenRequest(`/dapp/carts/${clientId}`, "DELETE", undefined, adminEnvConfig);
-
-// AFTER:
-await drGreenRequest(`/dapp/carts/client/${clientId}`, "DELETE", undefined, adminEnvConfig);
-```
-
-#### File 2: `src/pages/Checkout.tsx`
-
-**Change 1 — Add `hasFetchedAddressRef` and fix the useEffect dependency array (lines 165-241):**
-
-```tsx
-// Add at top of component, with other state/refs:
-const hasFetchedAddressRef = useRef(false);
-
-// Replace the useEffect:
-useEffect(() => {
-  // Only run once per mount / per clientId change
-  if (hasFetchedAddressRef.current) return;
-  if (addressManuallySaved) {
-    setIsLoadingAddress(false);
-    return;
-  }
-  if (!drGreenClient?.drgreen_client_id) {
-    setIsLoadingAddress(false);
-    return;
-  }
-  hasFetchedAddressRef.current = true;
-  checkShippingAddress();
-}, [drGreenClient?.drgreen_client_id, addressManuallySaved]);
-// ^^^^ KEY: depend on the string VALUE only, not the function reference
-```
-
-Also add `useRef` to the imports on line 1.
-
-**Change 2 — Reset the ref when address is manually saved** so re-fetching still works after the user saves a new address:
-
-In `handleShippingAddressSaved`, add:
-```tsx
-hasFetchedAddressRef.current = false;
-```
-
-#### File 3: `src/hooks/useProducts.ts`
-
-**Change 1 — Add 15-second Promise.race timeout:**
+Currently every method calls `callProxy(action, data)` with no `overrideEnv`. The fix tags each call:
 
 ```typescript
-const PRODUCT_FETCH_TIMEOUT_MS = 15000;
+// Patient-facing actions — ALWAYS production
+const createOrder = (orderData) =>
+  callProxy('create-order', { data: orderData }, 'production');
 
-// Wrap the supabase.functions.invoke call:
-const fetchPromise = supabase.functions.invoke('drgreen-proxy', {
-  body: {
-    action: 'get-strains-legacy',
-    countryCode: alpha3Code,
-    orderBy: 'desc',
-    take: 100,
-    page: 1,
-  },
-});
+const createPayment = (paymentData) =>
+  callProxy('create-payment', paymentData, 'production');
 
-const timeoutPromise = new Promise<{ data: null; error: { message: string } }>((_, reject) =>
-  setTimeout(() => reject(new Error('Product loading timed out. Please tap "Try Again".')), PRODUCT_FETCH_TIMEOUT_MS)
-);
+const getOrders = (clientId) =>
+  callProxy('get-orders', { clientId }, 'production');
 
-const { data, error: fnError } = await Promise.race([fetchPromise, timeoutPromise]);
+const getMyDetails = () =>
+  callProxy('get-my-details', {}, 'production');
+
+const updateShipping = (data) =>
+  callProxy('update-shipping', data, 'production');
+
+// Admin-only actions — use context env (caller must pass it explicitly)
+// getDappClients, getClientsSummary, getStrains — these remain flexible
 ```
 
----
+### Technical Detail: Proxy Guard
 
-### Expected Outcome After All Three Fixes
+At line ~1971 in the proxy, after `const envConfig = getEnvironment(requestedEnv)`, add:
 
-**Order creation:**
-```
-User places order
-  → Step 1: DApp has shipping — skip PATCH (confirmed by pre-check)
-  → Step 1.5: DELETE /dapp/carts/client/{clientId} → 200 OK (cart wiped)
-              sleep(1000ms)
-  → Step 2: POST /dapp/carts { clientId, strainId, quantity } → 201 Created
-  → Step 3: POST /dapp/orders { clientId } → real orderId returned
-  → Order saved with real Dr. Green ID (not LOCAL-*)
-```
+```typescript
+const PATIENT_TRANSACTIONAL_ACTIONS = [
+  'create-order', 'add-to-cart', 'create-payment', 
+  'get-payment', 'update-shipping', 'get-my-details', 'get-orders'
+];
 
-**Checkout page:**
-```
-User arrives at /checkout
-  → useEffect fires once (hasFetchedAddressRef = true)
-  → checkShippingAddress() called once
-  → savedAddress set from DApp API (one call)
-  → No further re-renders triggered by getClientDetails reference change
-  → Zero repeated API calls
+let adminEnvConfig = envConfig;
+if (PATIENT_TRANSACTIONAL_ACTIONS.includes(action) && requestedEnv === 'railway') {
+  console.warn(`[drgreen-proxy] SAFETY: Forcing production for transactional action "${action}" (requested: railway)`);
+  adminEnvConfig = ENV_CONFIG.production;
+}
 ```
 
-**Products:**
-```
-User loads /shop
-  → get-strains-legacy fires immediately with countryCode
-  → If responds in < 15s: products render normally
-  → If takes > 15s: user sees "Try Again" button (not infinite skeleton)
-  → With checkout loop fixed, Edge Function is no longer flooded
-  → Products should load in 2-5s normally
-```
+### Expected Outcome
 
-### Files to Change Summary
+After these changes:
+- Patient places order → proxy uses `DRGREEN_API_KEY` + `DRGREEN_PRIVATE_KEY` (production, valid keys) → signing succeeds → cart cleared → items added → order created → real `orderId` returned
+- Admin tests railway in API Test Runner → still uses staging keys (that tool passes explicit env)
+- Browser localStorage `hb-api-environment = "railway"` no longer breaks patient checkout
+- Even if `railway` leaks into a proxy call for a transactional action, the proxy guard catches it
 
-| File | Lines | Change |
-|---|---|---|
-| `supabase/functions/drgreen-proxy/index.ts` | 3163-3168 | Fix Step 1.5 cart clear: `/dapp/carts/${clientId}` → `/dapp/carts/client/${clientId}`, sleep 500→1000 |
-| `supabase/functions/drgreen-proxy/index.ts` | 3225-3232 | Fix 409 retry cart clear: same endpoint fix |
-| `supabase/functions/drgreen-proxy/index.ts` | 3347-3352 | Fix fallback cart clear: same endpoint fix |
-| `src/pages/Checkout.tsx` | 1, ~167, 241 | Add `useRef` import, `hasFetchedAddressRef`, fix dependency array |
-| `src/pages/Checkout.tsx` | ~258 | Reset ref in `handleShippingAddressSaved` |
-| `src/hooks/useProducts.ts` | ~128-141 | Add 15-second Promise.race timeout |
+### Deploy Step
+
+After editing the proxy, redeploy `drgreen-proxy`. The `useDrGreenApi.ts` change is frontend-only (no deploy needed beyond the normal build).
