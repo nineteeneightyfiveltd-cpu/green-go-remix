@@ -634,7 +634,7 @@ const Checkout = () => {
                             <div className="pt-4 border-t border-border/50">
                               <ShippingAddressForm
                                 clientId={drGreenClient.drgreen_client_id}
-                                initialAddress={savedAddress}
+                                initialAddress={null}
                                 defaultCountry={savedAddress?.countryCode || drGreenClient.country_code || countryCode || 'ZA'}
                                 onSuccess={handleShippingAddressSaved}
                                 submitLabel="Confirm Address"
