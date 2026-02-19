@@ -2508,13 +2508,15 @@ serve(async (req) => {
             innerData.shipping = normalizeShippingObject((innerData.shippings as Record<string, unknown>[])[0]);
             logInfo("Normalized shippings[] to shipping{} from DApp API", { clientId });
           }
-          // If API data has no shipping but local DB does, merge it in
-          if (!innerData.shipping && localClient?.shipping_address) {
-            const localShip = localClient.shipping_address as Record<string, unknown>;
-            if (localShip?.address1) {
-              innerData.shipping = normalizeShippingObject(localShip);
-              logInfo("Merged local DB shipping into API response", { clientId });
-            }
+          // Only merge local DB shipping if DApp returned NO real address data at all.
+          // This prevents stale local data from contaminating a valid (but empty) DApp shippings[].
+          const dappHasAddress = !!(innerData.shipping as Record<string, unknown> | undefined)?.address1 ||
+            (Array.isArray(innerData.shippings) && (innerData.shippings as Record<string, unknown>[]).some((s) => s?.address1));
+          logInfo("DApp address check", { clientId, dappHasAddress });
+          if (!dappHasAddress && (localClient?.shipping_address as Record<string, unknown> | null)?.address1) {
+            const localShip = localClient!.shipping_address as Record<string, unknown>;
+            innerData.shipping = normalizeShippingObject(localShip);
+            logInfo("Merged local DB shipping into API response (DApp has no address)", { clientId });
           }
           if (apiData.data) {
             return new Response(JSON.stringify(apiData), {
@@ -3042,13 +3044,18 @@ serve(async (req) => {
           // Pre-check: fetch client to see if shipping already exists
           let existingShipping = false;
           try {
-            const clientCheckResponse = await drGreenRequestQuery(`/dapp/clients/${clientId}`, {}, false, adminEnvConfig);
+          const clientCheckResponse = await drGreenRequestQuery(`/dapp/clients/${clientId}`, {}, false, adminEnvConfig);
             if (clientCheckResponse.ok) {
               const clientData = await clientCheckResponse.clone().json();
-              const shipping = clientData?.data?.shipping || clientData?.shipping;
-              if (shipping && shipping.address1) {
-                logInfo(`[${requestId}] Step 1: Client already has shipping address on API, skipping PATCH`, {
-                  address1: shipping.address1,
+              const innerClientData = clientData?.data || clientData;
+              // Check both singular 'shipping' and plural 'shippings[]' — DApp returns either shape
+              const singularShipping = innerClientData?.shipping;
+              const pluralShipping = Array.isArray(innerClientData?.shippings)
+                ? (innerClientData.shippings as Record<string, unknown>[]).find((s) => s?.address1)
+                : null;
+              const shipping = singularShipping?.address1 ? singularShipping : pluralShipping;
+              if (shipping?.address1) {
+                logInfo(`[${requestId}] Step 1: Client has shipping on DApp (singular or shippings[])`, {
                   city: shipping.city,
                 });
                 existingShipping = true;
@@ -3211,7 +3218,7 @@ serve(async (req) => {
                 lastCartError = await cartResponse.clone().text();
                 logWarn(`[${requestId}] Step 2: Cart item ${i + 1} failed`, { 
                   status: cartResponse.status,
-                  error: lastCartError.slice(0, 200),
+                  error: lastCartError.slice(0, 500),
                 });
                 
                 // On 409 Conflict, clear cart and retry full sequence
