@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { ShieldCheck } from 'lucide-react';
 import Header from '@/layout/Header';
@@ -25,26 +25,36 @@ const countries = [
 export default function Shop() {
   const { countryCode, drGreenClient, isEligible, syncVerificationFromDrGreen } = useShop();
   const { t } = useTranslation('shop');
-
-  // NOTE: Country is determined by URL domain in ShopContext - no override needed here
+  // Guard: prevents re-firing when syncVerificationFromDrGreen reference changes on re-render
+  const hasSyncedRef = useRef(false);
+  const syncRef = useRef(syncVerificationFromDrGreen);
+  syncRef.current = syncVerificationFromDrGreen; // always up-to-date without being a dep
 
   // Background polling for verification status (every 3 minutes)
+  // Only poll if user has a client record but is not yet eligible
+  // Using refs to prevent re-firing when function reference changes
   useEffect(() => {
-    // Only poll if user has a client record but is not yet eligible
-    if (!drGreenClient || isEligible) return;
+    if (!drGreenClient?.drgreen_client_id || isEligible) {
+      hasSyncedRef.current = false;
+      return;
+    }
 
-    // Initial sync
-    syncVerificationFromDrGreen();
+    // Initial sync — only once per clientId
+    if (!hasSyncedRef.current) {
+      hasSyncedRef.current = true;
+      syncRef.current();
+    }
 
     // Set up interval for polling every 3 minutes
-    const POLL_INTERVAL = 3 * 60 * 1000; // 3 minutes
+    const POLL_INTERVAL = 3 * 60 * 1000;
     const intervalId = setInterval(() => {
       console.log('Background sync: checking verification status...');
-      syncVerificationFromDrGreen();
+      syncRef.current();
     }, POLL_INTERVAL);
 
     return () => clearInterval(intervalId);
-  }, [drGreenClient, isEligible, syncVerificationFromDrGreen]);
+  // Depend only on stable string value and boolean, not function reference
+  }, [drGreenClient?.drgreen_client_id, isEligible]);
 
   return (
     <>
