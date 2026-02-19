@@ -114,7 +114,7 @@ export const COUNTRY_REGISTRY: Record<string, CountryConfig> = {
   },
   ZA: {
     alpha2: 'ZA', alpha3: 'ZAF', name: 'South Africa',
-    currency: 'ZAR', currencySymbol: 'R', locale: 'en-ZA',
+    currency: 'ZAR', currencySymbol: 'R', locale: 'en-GB',
     phonePrefix: '+27',
     phonePlaceholder: '+27 82 123 4567',
     phonePattern: '^\\+?27?\\s?[6-8]\\d{1}\\s?\\d{3}\\s?\\d{4}$',
