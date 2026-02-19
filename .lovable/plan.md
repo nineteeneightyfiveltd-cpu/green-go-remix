@@ -1,126 +1,165 @@
 
-# Checkout Endpoint Fixes — Combined Implementation Plan
+# Real-Time Order Confirmation + Webhook-Driven Status Updates
 
-## What the Audit Found
+## What We're Building
 
-### Issue 1 — `orderId` is never extracted from the Dr. Green response (CRITICAL)
+Two things that work together:
 
-**Where:** `supabase/functions/drgreen-proxy/index.ts`, lines 3272 and 3355
+1. **Enhanced Order Confirmation Screen** — After checkout, instead of a static "Order Confirmed" card, the user sees a live status panel showing the real Dr. Green `orderId`, the current status (`PENDING → PROCESSING → PAID`), and a real-time status tracker that updates automatically when the Dr. Green webhook fires.
 
-**What happens:** When the order creation succeeds (`response.ok` is true), the code executes `break`, which exits the switch and falls to the generic bottom handler at line 4801. That handler calls `response.json()` and returns the raw Dr. Green JSON unchanged. The Dr. Green API response shape is:
-
-```json
-{ "data": { "id": "real-uuid", "status": "PENDING", ... } }
-```
-
-But `Checkout.tsx` line 277 checks:
-```typescript
-orderResult.data?.orderId  // → undefined (raw response has no top-level orderId)
-```
-
-Since `orderId` is always `undefined`, the condition `if (orderResult.error || !orderResult.data?.orderId)` always throws `"Failed to create order"`, even when Dr. Green actually created the order successfully. This is why every order has a `LOCAL-*` ID despite the API call completing.
-
-**Fix:** Replace `break` at lines 3272 and 3355 with an explicit `return new Response(...)` that extracts `orderId` from the Dr. Green response before sending it to the frontend:
-
-```typescript
-// Extract orderId from Dr. Green's nested response
-const rawOrderData = await response.clone().json();
-const orderId = 
-  rawOrderData?.data?.id || 
-  rawOrderData?.data?.orderId || 
-  rawOrderData?.orderId || 
-  rawOrderData?.id || 
-  null;
-
-return new Response(JSON.stringify({
-  success: true,
-  orderId,
-  status: rawOrderData?.data?.status || 'PENDING',
-  totalAmount: rawOrderData?.data?.totalAmount || rawOrderData?.data?.total || 0,
-  createdAt: rawOrderData?.data?.createdAt || new Date().toISOString(),
-  requestId,
-}), { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 });
-```
-
-This applies at **both** success exit points (main path line 3272 and fallback path line 3355).
+2. **Realtime Status Subscription in OrderDetail** — The existing `/orders/:orderId` page gets a live Supabase Realtime subscription so status badges and the timeline update in-place the moment the webhook updates the database row — no refresh needed.
 
 ---
 
-### Issue 2 — `create-payment` and `get-payment` always fail (CRITICAL)
+## Why This Works End-to-End
 
-**Where:** `supabase/functions/drgreen-proxy/index.ts` lines 3468–3479; `src/pages/Checkout.tsx` lines 284–325
-
-**What happens:** After order creation, the checkout immediately calls `createPayment()` which sends `POST /dapp/payments` to the Dr. Green API. This endpoint is not in the Dr. Green API. It returns a 404 or 405 — causing `paymentResult.error` to be set, which throws `"Failed to initiate payment"` and triggers the `LOCAL-*` fallback.
-
-Even if the payment call somehow passed, there is a polling loop (lines 305–325) that waits up to 15 seconds checking `/dapp/payments/{id}` — another non-existent endpoint.
-
-**Fix:** Remove `createPayment` and `getPayment` from `Checkout.tsx`. After order creation returns a real `orderId`, complete the checkout immediately:
-- Save the order locally with `status: 'PENDING'` and `payment_status: 'AWAITING_PAYMENT'`
-- Clear the cart
-- Show the order confirmation
-
-Payment confirmation will arrive via webhook (`drgreen-webhook` edge function already handles this) or via admin action in the Dr. Green portal.
-
----
-
-## Files to Change
-
-| # | File | Change |
-|---|------|--------|
-| 1 | `supabase/functions/drgreen-proxy/index.ts` | Replace `break` at line 3272 with explicit `return new Response(...)` that extracts `orderId` |
-| 2 | `supabase/functions/drgreen-proxy/index.ts` | Replace `break` at line 3355 with the same explicit `return new Response(...)` |
-| 3 | `src/pages/Checkout.tsx` | Remove `createPayment` / `getPayment` polling block (lines 284–325); complete checkout at order creation |
-
----
-
-## Technical Details
-
-### What the proxy returns today vs what it should return
-
-**Today (broken):**
-```
-Dr. Green API response → break → generic bottom handler → returns raw JSON as-is
-{ "data": { "id": "real-uuid", "status": "PENDING" } }
-```
-
-**After fix:**
-```
-Dr. Green API response → normalised return directly from case block
-{ "success": true, "orderId": "real-uuid", "status": "PENDING", ... }
-```
-
-### Checkout flow after fix
+The pipeline already exists:
 
 ```text
-handlePlaceOrder()
-  → createOrder() via proxy   ← 3-step atomic: shipping + cart + order
-      → returns { success: true, orderId: "real-uuid" }
-  → saveOrder() locally       ← status: PENDING, payment_status: AWAITING_PAYMENT
-  → clearCart()
-  → setOrderComplete(true)    ← confirmation screen shown
-  → sendOrderConfirmationEmail() (fire-and-forget)
+Dr. Green API fires webhook
+  → drgreen-webhook edge function (already written)
+      → updates drgreen_orders.status / payment_status in DB
+          → Supabase Realtime broadcasts the DB change
+              → UI receives UPDATE event → re-renders status instantly
 ```
 
-No payment polling. No blocking. Order confirmed immediately when Dr. Green returns success.
+The only missing pieces are:
+- Realtime is not enabled for `drgreen_orders` (no `ALTER PUBLICATION` migration)
+- The checkout confirmation screen is static (no live subscription)
+- `OrderDetail` uses one-shot `useQuery` with no realtime listener
 
 ---
 
-## What Stays the Same
+## Changes Required
 
-- The 3-step atomic order flow (shipping PATCH → cart add → order POST) is correct and stays unchanged
-- The `LOCAL-*` fallback logic remains for genuine failures (network errors, 500s)
-- The `retryOperation` wrapper stays — it handles transient errors gracefully
-- The `useShopSafe` fix in Header stays (already applied, no change needed)
-- The `toAlpha3()` normalisation in the shipping payload stays (already applied, no change needed)
+### 1. Database Migration — Enable Realtime on `drgreen_orders`
+
+A new migration that adds `drgreen_orders` to the Supabase Realtime publication:
+
+```sql
+ALTER PUBLICATION supabase_realtime ADD TABLE public.drgreen_orders;
+```
+
+This is the single enabler. Without it, no amount of frontend subscription code will receive live updates. The existing RLS policies already protect per-user visibility, so realtime inherits those rules safely.
 
 ---
 
-## Expected Outcome After Fix
+### 2. New Component — `OrderConfirmation.tsx`
 
-1. `create-order` succeeds → proxy returns `{ success: true, orderId: "real-uuid" }`
-2. `Checkout.tsx` reads `orderResult.data.orderId` → it is now set → no `"Failed to create order"` exception
-3. Order is saved to `drgreen_orders` with the real `drgreen_order_id` (not `LOCAL-*`)
-4. User sees "Order Submitted" confirmation immediately
-5. `drgreen_orders` table will show real Dr. Green order IDs for all new orders
+**File:** `src/components/shop/OrderConfirmation.tsx`
 
-The edge function is redeployed automatically after the proxy change.
+A self-contained component that:
+
+- Accepts `orderId` (Dr. Green ID or `LOCAL-*`) and `isLocalOrder` as props
+- Subscribes to `postgres_changes` on `drgreen_orders` filtered to `drgreen_order_id = orderId`
+- Displays:
+  - Animated success icon (green checkmark for real orders, amber clock for local)
+  - Dr. Green order ID in monospace, clearly labelled
+  - Live status badge that updates when webhook fires: `PENDING → PROCESSING → PAID → SHIPPED → DELIVERED`
+  - Live payment status badge
+  - A minimal inline timeline (4 steps: Placed → Processing → Payment → Delivered)
+  - "View Full Order Details" button linking to `/orders/{localRowId}`
+  - "Continue Shopping" button
+- Shows a subtle "Status updated just now" pulse animation when status changes
+- Handles `LOCAL-*` orders gracefully (no live subscription, shows manual review messaging)
+
+The component uses the same `postgres_changes` pattern already in `useOrderTracking.ts`, making it consistent with existing patterns.
+
+---
+
+### 3. Update `Checkout.tsx` — Replace Static Confirmation with `OrderConfirmation`
+
+**File:** `src/pages/Checkout.tsx`
+
+Current state (lines 421–498): Static card with orderId text and two buttons.
+
+Changes:
+- Store the local DB row `id` (UUID from `saveOrder` return value) in addition to `drgreen_order_id` — needed to link to `/orders/:id`
+- Replace the entire static `orderComplete` JSX block with `<OrderConfirmation>` — the component handles both real and local orders
+- Pass `orderId`, `localRowId`, and `isLocalOrder` to the component
+
+`saveOrder` already returns the inserted row including the UUID `id`. We just need to capture it: `const savedOrder = await saveOrder(...)` then `setLocalRowId(savedOrder.id)`.
+
+---
+
+### 4. Update `OrderDetail.tsx` — Add Realtime Subscription
+
+**File:** `src/pages/OrderDetail.tsx`
+
+Current state: Uses `useQuery` (one-time fetch, no live updates).
+
+Changes:
+- Add a `useEffect` that subscribes to `postgres_changes` on `drgreen_orders` with filter `id=eq.${orderId}`
+- On UPDATE event, call `queryClient.invalidateQueries(['order-detail', orderId])` to refetch and re-render
+- Show a subtle "Live" indicator dot (green pulse) next to the order ID when the subscription is active
+- Add a `useQueryClient` import
+- Clean up the subscription on unmount
+
+This makes the timeline and status badges update automatically when Dr. Green sends a `payment.completed` or `order.shipped` webhook — the user sees it live without refreshing.
+
+---
+
+### 5. Update `drgreen-webhook/index.ts` — Broadcast Realtime on Order Updates
+
+**File:** `supabase/functions/drgreen-webhook/index.ts`
+
+Current state (lines 702–713): Updates `drgreen_orders` but does NOT broadcast to Realtime channel.
+
+The `ALTER PUBLICATION` migration in step 1 handles DB-level realtime for `postgres_changes`. However, the webhook also sends inventory updates via a Supabase Realtime broadcast channel (`stock-updates`). We should add a matching broadcast for order updates so that any component listening on a channel (not just `postgres_changes`) also gets notified:
+
+```typescript
+// After the DB update succeeds (line 714):
+const orderChannel = supabase.channel('order-updates');
+await orderChannel.send({
+  type: 'broadcast',
+  event: 'order-change',
+  payload: {
+    orderId: payload.orderId,
+    status: updates.status || null,
+    payment_status: updates.payment_status || null,
+    event: payload.event,
+  },
+});
+```
+
+This is additive — it does not change existing behavior, it just adds a broadcast that the `OrderConfirmation` component can also listen to as a fallback.
+
+---
+
+## Component Design — `OrderConfirmation`
+
+```text
+┌─────────────────────────────────────────┐
+│  ✅  Order Confirmed                    │
+│                                         │
+│  Order ID                               │
+│  ┌─────────────────────────────────┐    │
+│  │  3f8a-c2b1-...  [PENDING] [AWAITING] │
+│  └─────────────────────────────────┘    │
+│                                         │
+│  ──●────────────────────────────────    │
+│  Placed  Processing  Payment  Delivered │
+│                                         │
+│  ℹ Payment is handled by our team.     │
+│    You'll receive an email when         │
+│    your payment is confirmed.           │
+│                                         │
+│  [View Order Details]  [Continue Shopping] │
+└─────────────────────────────────────────┘
+```
+
+Status badges use the same color system as `OrderDetail` (green/blue/amber/red). The timeline dots animate forward automatically when status changes are received from Realtime.
+
+---
+
+## Files Changed
+
+| # | File | Type | Change |
+|---|------|------|--------|
+| 1 | `supabase/migrations/` | New migration | `ALTER PUBLICATION supabase_realtime ADD TABLE drgreen_orders` |
+| 2 | `src/components/shop/OrderConfirmation.tsx` | New component | Live order status panel with Realtime subscription |
+| 3 | `src/pages/Checkout.tsx` | Edit | Capture `localRowId` from `saveOrder`, replace static confirmation with `<OrderConfirmation>` |
+| 4 | `src/pages/OrderDetail.tsx` | Edit | Add `postgres_changes` subscription + "Live" indicator |
+| 5 | `supabase/functions/drgreen-webhook/index.ts` | Edit | Broadcast `order-change` event after DB update |
+
+No new secrets, no new tables, no auth changes required.
