@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { z } from 'zod';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { MapPin, Loader2, Save, Check, Clipboard } from 'lucide-react';
+import { MapPin, Loader2, Save, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -24,90 +24,21 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { useToast } from '@/hooks/use-toast';
 import { useDrGreenApi } from '@/hooks/useDrGreenApi';
 import { supabase } from '@/integrations/supabase/client';
-import { toAlpha3, toAlpha2, DEFAULT_COUNTRY, getCountryConfig } from '@/lib/countries';
+import { toAlpha3, toAlpha2, DEFAULT_COUNTRY, getCountryConfig, SUPPORTED_COUNTRIES, COUNTRY_REGISTRY } from '@/lib/countries';
 
-// Country options for the dropdown
-const countries = [
-  { code: 'PT', name: 'Portugal', alpha3: 'PRT' },
-  { code: 'ZA', name: 'South Africa', alpha3: 'ZAF' },
-  { code: 'TH', name: 'Thailand', alpha3: 'THA' },
-  { code: 'GB', name: 'United Kingdom', alpha3: 'GBR' },
-];
+// Country options for the dropdown — driven from COUNTRY_REGISTRY (single source of truth)
+const countries = SUPPORTED_COUNTRIES.map(code => ({
+  code,
+  name: COUNTRY_REGISTRY[code].name,
+  alpha3: COUNTRY_REGISTRY[code].alpha3,
+}));
 
-// Country-specific postal code validation
-const postalCodePatterns: Record<string, { pattern: RegExp; example: string }> = {
-  PT: { pattern: /^\d{4}(-\d{3})?$/, example: '1000-001' },
-  GB: { pattern: /^[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}$/i, example: 'SW1A 1AA' },
-  ZA: { pattern: /^\d{4}$/, example: '2196' },
-  TH: { pattern: /^\d{5}$/, example: '10110' },
-};
-
-// Country-specific field placeholders
-const countryPlaceholders: Record<string, {
-  address1: string;
-  address2: string;
-  city: string;
-  state: string;
-  landmark: string;
-}> = {
-  PT: {
-    address1: 'ex. Rua das Flores, 25',
-    address2: 'ex. Andar 3 (opcional)',
-    city: 'ex. Lisboa',
-    state: 'ex. Setúbal',
-    landmark: 'ex. perto da estação',
-  },
-  ZA: {
-    address1: 'e.g. 45 Main Street',
-    address2: 'e.g. Unit 5B (optional)',
-    city: 'e.g. Cape Town',
-    state: 'e.g. Western Cape',
-    landmark: 'e.g. near the shopping centre',
-  },
-  GB: {
-    address1: 'e.g. 12 High Street',
-    address2: 'e.g. Flat 2A (optional)',
-    city: 'e.g. London',
-    state: 'e.g. Surrey',
-    landmark: 'e.g. near the post office',
-  },
-  TH: {
-    address1: 'e.g. 88 Charoen Krung Rd',
-    address2: 'e.g. Room 4B (optional)',
-    city: 'e.g. Bangkok',
-    state: 'e.g. Chiang Rai',
-    landmark: 'e.g. near BTS station',
-  },
-};
-
-// Country-specific field labels
-const countryLabels: Record<string, {
-  state: string;
-  postalCode: string;
-  address2: string;
-}> = {
-  PT: { state: 'Distrito', postalCode: 'Código Postal', address2: 'Apartamento / Andar (Opcional)' },
-  ZA: { state: 'Province', postalCode: 'Postal Code', address2: 'Unit / Suite (Optional)' },
-  GB: { state: 'County', postalCode: 'Post Code', address2: 'Flat / Apartment (Optional)' },
-  TH: { state: 'Changwat (Province)', postalCode: 'Postal Code', address2: 'Room / Unit (Optional)' },
-};
-
-const getPlaceholder = (country: string, field: keyof typeof countryPlaceholders['PT']) => {
-  return countryPlaceholders[country]?.[field] || countryPlaceholders['ZA'][field];
-};
-
-const getLabel = (country: string, field: keyof typeof countryLabels['PT']) => {
-  return countryLabels[country]?.[field] || countryLabels['ZA'][field];
-};
-
-const getCountryName = (code: string): string => {
-  return getCountryConfig(code).name || code;
-};
-
-// Create address schema with country-specific validation
+// Create address schema with country-specific validation from COUNTRY_REGISTRY
 const createAddressSchema = (countryCode: string) => {
-  const postalPattern = postalCodePatterns[countryCode];
-  
+  const cfg = getCountryConfig(countryCode);
+  // postalCodePattern is a regex string in the registry — compile it (case-insensitive)
+  const postalRegex = new RegExp(cfg.postalCodePattern, 'i');
+
   return z.object({
     address1: z.string()
       .min(5, 'Address must be at least 5 characters')
@@ -121,14 +52,15 @@ const createAddressSchema = (countryCode: string) => {
     postalCode: z.string()
       .min(4, 'Postal code is required')
       .refine(
-        (val) => !postalPattern || postalPattern.pattern.test(val.trim()),
-        { message: `Invalid postal code format (e.g., ${postalPattern?.example || '12345'})` }
+        (val) => postalRegex.test(val.trim()),
+        { message: `Invalid format (e.g. ${cfg.postalCodePlaceholder})` }
       ),
     country: z.string().min(2, 'Country is required'),
   });
 };
 
 type AddressFormData = z.infer<ReturnType<typeof createAddressSchema>>;
+
 
 export interface ShippingAddress {
   address1: string;
@@ -212,7 +144,7 @@ export function ShippingAddressForm({
         landmark: data.landmark?.trim() || '',
         city: data.city.trim(),
         state: data.state?.trim() || data.city.trim(), // Default state to city if not provided
-        country: getCountryName(data.country),
+        country: getCountryConfig(data.country).name || data.country,
         countryCode: alpha3CountryCode,
         postalCode: data.postalCode.trim(),
       };
@@ -288,6 +220,10 @@ export function ShippingAddressForm({
     }
   };
 
+  // Get locale-aware config for the currently selected country (single source of truth)
+  const cfg = getCountryConfig(selectedCountry);
+  const hints = cfg.addressHints;
+
   const formContent = (
     <Form {...form}>
       <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-4">
@@ -299,7 +235,7 @@ export function ShippingAddressForm({
             <FormItem>
               <FormLabel>Street Address *</FormLabel>
               <FormControl>
-                <Input placeholder={getPlaceholder(selectedCountry, 'address1')} {...field} />
+                <Input placeholder={hints.address1} {...field} />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -312,9 +248,17 @@ export function ShippingAddressForm({
           name="address2"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>{getLabel(selectedCountry, 'address2')}</FormLabel>
+              <FormLabel>
+                {hints.stateLabel === 'Distrito'
+                  ? 'Apartamento / Andar (Opcional)'
+                  : hints.stateLabel === 'County'
+                  ? 'Flat / Apartment (Optional)'
+                  : hints.stateLabel === 'Changwat (Province)'
+                  ? 'Room / Unit (Optional)'
+                  : 'Unit / Suite (Optional)'}
+              </FormLabel>
               <FormControl>
-                <Input placeholder={getPlaceholder(selectedCountry, 'address2')} {...field} />
+                <Input placeholder={hints.address2} {...field} />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -330,7 +274,7 @@ export function ShippingAddressForm({
               <FormItem>
                 <FormLabel>City *</FormLabel>
                 <FormControl>
-                  <Input placeholder={getPlaceholder(selectedCountry, 'city')} {...field} />
+                  <Input placeholder={hints.city} {...field} />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -342,9 +286,9 @@ export function ShippingAddressForm({
             name="state"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{getLabel(selectedCountry, 'state')}</FormLabel>
+                <FormLabel>{hints.stateLabel}</FormLabel>
                 <FormControl>
-                  <Input placeholder={getPlaceholder(selectedCountry, 'state')} {...field} />
+                  <Input placeholder={hints.state} {...field} />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -359,12 +303,9 @@ export function ShippingAddressForm({
             name="postalCode"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{getLabel(selectedCountry, 'postalCode')} *</FormLabel>
+                <FormLabel>{cfg.postalCodeLabel} *</FormLabel>
                 <FormControl>
-                  <Input 
-                    placeholder={postalCodePatterns[selectedCountry]?.example || '12345'} 
-                    {...field} 
-                  />
+                  <Input placeholder={cfg.postalCodePlaceholder} {...field} />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -405,7 +346,7 @@ export function ShippingAddressForm({
             <FormItem>
               <FormLabel>Landmark (Optional)</FormLabel>
               <FormControl>
-                <Input placeholder={getPlaceholder(selectedCountry, 'landmark')} {...field} />
+                <Input placeholder={hints.landmark} {...field} />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -419,9 +360,9 @@ export function ShippingAddressForm({
               Cancel
             </Button>
           )}
-          <Button 
-            type="submit" 
-            disabled={isSaving} 
+          <Button
+            type="submit"
+            disabled={isSaving}
             className="flex-1"
           >
             {isSaving ? (

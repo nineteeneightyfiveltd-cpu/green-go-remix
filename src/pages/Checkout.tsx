@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, ShoppingBag, CreditCard, AlertCircle, Loader2, MapPin, Home, Building2, Check } from 'lucide-react';
+import { ArrowLeft, ShoppingBag, CreditCard, AlertCircle, Loader2, MapPin, Home, Building2, Check, Pencil } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
@@ -116,6 +116,7 @@ const Checkout = () => {
   const [needsShippingAddress, setNeedsShippingAddress] = useState(false);
   const [addressMode, setAddressMode] = useState<'saved' | 'custom'>('saved');
   const [addressManuallySaved, setAddressManuallySaved] = useState(false);
+  const [isEditingAddress, setIsEditingAddress] = useState(false);
 
   // Helper: extract best shipping object from DApp response, handling all envelope shapes
   const extractShipping = (data: unknown): Record<string, unknown> | null => {
@@ -249,14 +250,12 @@ const Checkout = () => {
 
   const handleShippingAddressSaved = (address: ShippingAddress) => {
     console.log('[Checkout] Address saved:', address);
-    // Mark as manually saved to prevent useEffect from re-fetching and overwriting
     setAddressManuallySaved(true);
-    // Set address FIRST, before changing needsShippingAddress
     setShippingAddress(address);
-    setSavedAddress(address); // Also save as "saved" address
-    // Then update state to show the address selection UI
+    setSavedAddress(address);
     setNeedsShippingAddress(false);
     setAddressMode('saved');
+    setIsEditingAddress(false);
     toast({
       title: 'Shipping Address Saved',
       description: 'You can now proceed with your order.',
@@ -641,34 +640,73 @@ const Checkout = () => {
                           >
                             {/* Option 1: Use saved address */}
                             {savedAddress && (
-                              <div 
-                                className={`flex items-start gap-3 p-4 rounded-lg border transition-colors cursor-pointer ${
-                                  addressMode === 'saved' 
-                                    ? 'border-primary bg-primary/5' 
-                                    : 'border-border/50 hover:border-border'
-                                }`}
-                                onClick={() => handleAddressModeChange('saved')}
-                              >
-                                <RadioGroupItem value="saved" id="addr-saved" className="mt-1" />
-                                <Label htmlFor="addr-saved" className="flex-1 cursor-pointer">
-                                  <div className="flex items-center gap-2 font-medium">
-                                    <Home className="h-4 w-4 text-muted-foreground" />
-                                    Use saved address
+                              <>
+                                <div
+                                  className={`flex items-start gap-3 p-4 rounded-lg border transition-colors cursor-pointer ${
+                                    addressMode === 'saved'
+                                      ? 'border-primary bg-primary/5'
+                                      : 'border-border/50 hover:border-border'
+                                  }`}
+                                  onClick={() => { handleAddressModeChange('saved'); setIsEditingAddress(false); }}
+                                >
+                                  <RadioGroupItem value="saved" id="addr-saved" className="mt-1" />
+                                  <Label htmlFor="addr-saved" className="flex-1 cursor-pointer">
+                                    <div className="flex items-center justify-between">
+                                      <span className="flex items-center gap-2 font-medium">
+                                        <Home className="h-4 w-4 text-muted-foreground" />
+                                        Use saved address
+                                      </span>
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="sm"
+                                        className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleAddressModeChange('saved');
+                                          setIsEditingAddress((prev) => !prev);
+                                        }}
+                                      >
+                                        <Pencil className="h-3.5 w-3.5 mr-1" />
+                                        {isEditingAddress ? 'Cancel edit' : 'Edit'}
+                                      </Button>
+                                    </div>
+                                    <div className="text-sm text-muted-foreground mt-1">
+                                      {savedAddress.address1}<br />
+                                      {savedAddress.city}, {savedAddress.postalCode}<br />
+                                      {savedAddress.country}
+                                    </div>
+                                  </Label>
+                                </div>
+
+                                {/* Inline edit form — pre-filled with current saved address */}
+                                {isEditingAddress && addressMode === 'saved' && drGreenClient && (
+                                  <div className="pt-3 pb-1 px-1 border border-border/50 rounded-lg bg-muted/20">
+                                    <p className="text-xs font-medium text-muted-foreground px-3 pt-3 pb-2 flex items-center gap-1.5">
+                                      <Pencil className="h-3 w-3" />
+                                      Edit your delivery address
+                                    </p>
+                                    <div className="px-3 pb-3">
+                                      <ShippingAddressForm
+                                        clientId={drGreenClient.drgreen_client_id}
+                                        initialAddress={savedAddress}
+                                        defaultCountry={savedAddress?.countryCode || drGreenClient.country_code || countryCode || 'ZA'}
+                                        onSuccess={handleShippingAddressSaved}
+                                        onCancel={() => setIsEditingAddress(false)}
+                                        submitLabel="Update Address"
+                                        variant="inline"
+                                      />
+                                    </div>
                                   </div>
-                                  <div className="text-sm text-muted-foreground mt-1">
-                                    {savedAddress.address1}<br />
-                                    {savedAddress.city}, {savedAddress.postalCode}<br />
-                                    {savedAddress.country}
-                                  </div>
-                                </Label>
-                              </div>
+                                )}
+                              </>
                             )}
                             
                             {/* Option 2: Different address */}
-                            <div 
+                            <div
                               className={`flex items-start gap-3 p-4 rounded-lg border transition-colors cursor-pointer ${
-                                addressMode === 'custom' 
-                                  ? 'border-primary bg-primary/5' 
+                                addressMode === 'custom'
+                                  ? 'border-primary bg-primary/5'
                                   : 'border-border/50 hover:border-border'
                               }`}
                               onClick={() => handleAddressModeChange('custom')}
