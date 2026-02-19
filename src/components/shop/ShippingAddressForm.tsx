@@ -38,8 +38,50 @@ const countries = [
 const postalCodePatterns: Record<string, { pattern: RegExp; example: string }> = {
   PT: { pattern: /^\d{4}(-\d{3})?$/, example: '1000-001' },
   GB: { pattern: /^[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}$/i, example: 'SW1A 1AA' },
-  ZA: { pattern: /^\d{4}$/, example: '0001' },
+  ZA: { pattern: /^\d{4}$/, example: '2196' },
   TH: { pattern: /^\d{5}$/, example: '10110' },
+};
+
+// Country-specific field placeholders
+const countryPlaceholders: Record<string, {
+  address1: string;
+  address2: string;
+  city: string;
+  state: string;
+  landmark: string;
+}> = {
+  PT: {
+    address1: 'Rua Augusta 100',
+    address2: 'Andar 3',
+    city: 'Lisboa',
+    state: 'Lisboa',
+    landmark: 'Perto da Praça',
+  },
+  ZA: {
+    address1: '123 Rivonia Road',
+    address2: 'Unit 5B',
+    city: 'Johannesburg',
+    state: 'Gauteng',
+    landmark: 'Near Sandton City',
+  },
+  GB: {
+    address1: '10 Downing Street',
+    address2: 'Flat 2A',
+    city: 'London',
+    state: 'England',
+    landmark: 'Near Westminster',
+  },
+  TH: {
+    address1: '123 Sukhumvit Road',
+    address2: 'Room 4B',
+    city: 'Bangkok',
+    state: 'Krung Thep',
+    landmark: 'Near BTS Asok',
+  },
+};
+
+const getPlaceholder = (country: string, field: keyof typeof countryPlaceholders['PT']) => {
+  return countryPlaceholders[country]?.[field] || countryPlaceholders['ZA'][field];
 };
 
 const getCountryName = (code: string): string => {
@@ -229,7 +271,7 @@ export function ShippingAddressForm({
             <FormItem>
               <FormLabel>Street Address *</FormLabel>
               <FormControl>
-                <Input placeholder="123 Main Street" {...field} />
+                <Input placeholder={getPlaceholder(selectedCountry, 'address1')} {...field} />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -244,7 +286,7 @@ export function ShippingAddressForm({
             <FormItem>
               <FormLabel>Apartment / Suite (Optional)</FormLabel>
               <FormControl>
-                <Input placeholder="Apt 4B" {...field} />
+                <Input placeholder={getPlaceholder(selectedCountry, 'address2')} {...field} />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -260,7 +302,7 @@ export function ShippingAddressForm({
               <FormItem>
                 <FormLabel>City *</FormLabel>
                 <FormControl>
-                  <Input placeholder="Lisbon" {...field} />
+                  <Input placeholder={getPlaceholder(selectedCountry, 'city')} {...field} />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -274,7 +316,7 @@ export function ShippingAddressForm({
               <FormItem>
                 <FormLabel>State / Province</FormLabel>
                 <FormControl>
-                  <Input placeholder="Lisbon" {...field} />
+                  <Input placeholder={getPlaceholder(selectedCountry, 'state')} {...field} />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -335,7 +377,7 @@ export function ShippingAddressForm({
             <FormItem>
               <FormLabel>Landmark (Optional)</FormLabel>
               <FormControl>
-                <Input placeholder="Near the park" {...field} />
+                <Input placeholder={getPlaceholder(selectedCountry, 'landmark')} {...field} />
               </FormControl>
               <FormMessage />
             </FormItem>

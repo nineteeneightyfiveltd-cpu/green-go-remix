@@ -284,12 +284,17 @@ serve(async (req) => {
 
         // Map DApp shippings[0] → local shipping_address JSONB
         const dappShipping = shippings[0];
-        const shippingAddress = dappShipping?.address1 ? {
-          address1: dappShipping.address1,
-          address2: dappShipping.address2 || '',
+        // Debug: log raw shippings for first 3 clients
+        if (totalSynced < 3) {
+          console.log(`[SyncClients] Raw shippings for ${email}:`, JSON.stringify(shippings));
+        }
+        // Build shipping object from any available data (not just when address1 exists)
+        const shippingAddress = dappShipping ? {
+          address1: (dappShipping as any).address1 || (dappShipping as any).addressLine1 || '',
+          address2: (dappShipping as any).address2 || (dappShipping as any).addressLine2 || '',
           city: dappShipping.city || '',
           state: dappShipping.state || dappShipping.city || '',
-          postalCode: dappShipping.postalCode || '',
+          postalCode: (dappShipping as any).postalCode || (dappShipping as any).zipCode || (dappShipping as any).zip || '',
           country: dappShipping.country || rawCountry,
           countryCode: dappShipping.countryCode || countryCode,
           landmark: dappShipping.landmark || '',
@@ -300,8 +305,11 @@ serve(async (req) => {
           .eq('drgreen_client_id', clientId).maybeSingle();
 
         if (existing) {
-          // Always update shipping_address from DApp if it exists and local is empty
-          const needsShippingUpdate = shippingAddress && !existing.shipping_address;
+          // Update shipping if DApp has address1 and local record is missing it
+          const localAddr = existing.shipping_address as Record<string, unknown> | null;
+          const dappHasAddress1 = !!(shippingAddress?.address1);
+          const localMissingAddress1 = !localAddr || !localAddr.address1;
+          const needsShippingUpdate = dappHasAddress1 && localMissingAddress1;
           if (existing.is_kyc_verified !== isKYCVerified || existing.admin_approval !== adminApproval || needsShippingUpdate) {
             await adminClient.from('drgreen_clients').update({
               is_kyc_verified: isKYCVerified, admin_approval: adminApproval,
