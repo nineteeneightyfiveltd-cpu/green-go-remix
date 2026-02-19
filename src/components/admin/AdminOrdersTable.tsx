@@ -7,6 +7,7 @@
 import { useState, useMemo } from "react";
 import { format } from "date-fns";
 import { formatPrice } from "@/lib/currency";
+import { DEFAULT_COUNTRY } from "@/lib/countries";
 import { motion } from "framer-motion";
 import {
   Table,
@@ -396,7 +397,7 @@ export function AdminOrdersTable({
                   </Tooltip>
                 </TableCell>
                 <TableCell className="text-right font-medium">
-                  {formatPrice(order.total_amount ?? 0, order.country_code || 'ZA')}
+                  {formatPrice(order.total_amount ?? 0, order.country_code || DEFAULT_COUNTRY)}
                 </TableCell>
                 <TableCell>{getOrderStatusBadge(order.status)}</TableCell>
                 <TableCell>{getPaymentStatusBadge(order.payment_status)}</TableCell>

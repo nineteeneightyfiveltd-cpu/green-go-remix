@@ -348,7 +348,7 @@ const AdminStrains = () => {
                       <TableHead>Type</TableHead>
                       <TableHead>THC</TableHead>
                       <TableHead>CBD</TableHead>
-                      <TableHead>Price</TableHead>
+                      <TableHead>Price (EUR)</TableHead>
                       <TableHead>Stock</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead className="text-right">Actions</TableHead>
@@ -389,7 +389,7 @@ const AdminStrains = () => {
                           </TableCell>
                           <TableCell>{strain.thc_content}%</TableCell>
                           <TableCell>{strain.cbd_content}%</TableCell>
-                          <TableCell>{formatPrice(strain.retail_price, 'ZA')}</TableCell>
+                          <TableCell>{formatPrice(strain.retail_price, 'PT')}</TableCell>
                           <TableCell>{strain.stock}</TableCell>
                           <TableCell>
                             <div className="flex flex-col gap-1">

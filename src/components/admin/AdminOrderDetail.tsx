@@ -6,6 +6,7 @@
 
 import { format } from "date-fns";
 import { formatPrice } from "@/lib/currency";
+import { DEFAULT_COUNTRY } from "@/lib/countries";
 import { motion } from "framer-motion";
 import {
   Sheet,
@@ -208,7 +209,7 @@ export function AdminOrderDetail({
                 </div>
                 <div>
                   <p className="text-muted-foreground">Total</p>
-                  <p className="font-medium text-lg">{formatPrice(order.total_amount ?? 0, order.country_code || 'ZA')}</p>
+                  <p className="font-medium text-lg">{formatPrice(order.total_amount ?? 0, order.country_code || DEFAULT_COUNTRY)}</p>
                 </div>
                 <div>
                   <p className="text-muted-foreground">Payment</p>
@@ -300,10 +301,10 @@ export function AdminOrderDetail({
                     <div>
                       <p className="font-medium">{item.strainName}</p>
                       <p className="text-xs text-muted-foreground">
-                        Qty: {item.quantity} × {formatPrice(item.unitPrice ?? 0, order.country_code || 'ZA')}
+                        Qty: {item.quantity} × {formatPrice(item.unitPrice ?? 0, order.country_code || DEFAULT_COUNTRY)}
                       </p>
                     </div>
-                    <p className="font-medium">{formatPrice(item.totalPrice ?? 0, order.country_code || 'ZA')}</p>
+                    <p className="font-medium">{formatPrice(item.totalPrice ?? 0, order.country_code || DEFAULT_COUNTRY)}</p>
                   </motion.div>
                 ))}
               </div>

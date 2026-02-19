@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { formatPrice } from "@/lib/currency";
+import { DEFAULT_COUNTRY } from "@/lib/countries";
 import { motion } from "framer-motion";
 import { 
   Users, 
@@ -136,7 +137,7 @@ const AdminDashboard = () => {
         items.push({
           id: o.id,
           label: o.customer_name || o.drgreen_order_id,
-          detail: `Order ${o.status} — ${formatPrice(o.total_amount ?? 0, o.country_code || 'ZA')}`,
+          detail: `Order ${o.status} — ${formatPrice(o.total_amount ?? 0, o.country_code || DEFAULT_COUNTRY)}`,
           time: o.created_at,
           type: 'order',
         });
@@ -445,7 +446,7 @@ const AdminDashboard = () => {
                 <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
                   <span className="text-sm text-muted-foreground">Total Sales</span>
                   <span className="text-lg font-bold text-foreground">
-                    {loading ? '—' : formatPrice(stats?.dappTotalSales || 0, 'ZA')}
+                    {loading ? '—' : (stats?.dappTotalSales ? formatPrice(stats.dappTotalSales, 'PT') : '€0.00')}
                   </span>
                 </div>
                 <div className="flex items-center justify-between p-3 rounded-lg bg-muted/50">
