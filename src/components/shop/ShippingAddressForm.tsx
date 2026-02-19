@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { z } from 'zod';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -80,8 +80,24 @@ const countryPlaceholders: Record<string, {
   },
 };
 
+// Country-specific field labels
+const countryLabels: Record<string, {
+  state: string;
+  postalCode: string;
+  address2: string;
+}> = {
+  PT: { state: 'Distrito', postalCode: 'Código Postal', address2: 'Apartamento / Andar (Opcional)' },
+  ZA: { state: 'Province', postalCode: 'Postal Code', address2: 'Unit / Suite (Optional)' },
+  GB: { state: 'County', postalCode: 'Post Code', address2: 'Flat / Apartment (Optional)' },
+  TH: { state: 'Changwat (Province)', postalCode: 'Postal Code', address2: 'Room / Unit (Optional)' },
+};
+
 const getPlaceholder = (country: string, field: keyof typeof countryPlaceholders['PT']) => {
   return countryPlaceholders[country]?.[field] || countryPlaceholders['ZA'][field];
+};
+
+const getLabel = (country: string, field: keyof typeof countryLabels['PT']) => {
+  return countryLabels[country]?.[field] || countryLabels['ZA'][field];
 };
 
 const getCountryName = (code: string): string => {
@@ -171,6 +187,15 @@ export function ShippingAddressForm({
   });
 
   const selectedCountry = form.watch('country');
+
+  // Re-validate postal code when country changes (schema pattern changes)
+  useEffect(() => {
+    form.clearErrors('postalCode');
+    const currentPostal = form.getValues('postalCode');
+    if (currentPostal) {
+      form.trigger('postalCode');
+    }
+  }, [selectedCountry]);
 
   const handleSubmit = async (data: AddressFormData) => {
     console.log('[ShippingAddressForm] Form submitted with:', data);
@@ -284,7 +309,7 @@ export function ShippingAddressForm({
           name="address2"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Apartment / Suite (Optional)</FormLabel>
+              <FormLabel>{getLabel(selectedCountry, 'address2')}</FormLabel>
               <FormControl>
                 <Input placeholder={getPlaceholder(selectedCountry, 'address2')} {...field} />
               </FormControl>
@@ -314,7 +339,7 @@ export function ShippingAddressForm({
             name="state"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>State / Province</FormLabel>
+                <FormLabel>{getLabel(selectedCountry, 'state')}</FormLabel>
                 <FormControl>
                   <Input placeholder={getPlaceholder(selectedCountry, 'state')} {...field} />
                 </FormControl>
@@ -331,7 +356,7 @@ export function ShippingAddressForm({
             name="postalCode"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Postal Code *</FormLabel>
+                <FormLabel>{getLabel(selectedCountry, 'postalCode')} *</FormLabel>
                 <FormControl>
                   <Input 
                     placeholder={postalCodePatterns[selectedCountry]?.example || '12345'} 
