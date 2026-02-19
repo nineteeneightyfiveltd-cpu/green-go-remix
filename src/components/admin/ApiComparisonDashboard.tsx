@@ -437,17 +437,17 @@ function StrainsComparisonTable({ diffs, loading }: StrainsComparisonTableProps)
               </TableCell>
               <TableCell className="text-right">
                 {diff.production?.retailPrice != null
-                  ? formatPrice(diff.production.retailPrice, 'ZA')
+                  ? formatPrice(diff.production.retailPrice, 'PT')
                   : <span className="text-muted-foreground">—</span>}
               </TableCell>
               <TableCell className="text-right">
                 {diff.staging?.retailPrice != null
-                  ? formatPrice(diff.staging.retailPrice, 'ZA')
+                  ? formatPrice(diff.staging.retailPrice, 'PT')
                   : <span className="text-muted-foreground">—</span>}
               </TableCell>
               <TableCell className="text-right">
                 {diff.railway?.retailPrice != null
-                  ? formatPrice(diff.railway.retailPrice, 'ZA')
+                  ? formatPrice(diff.railway.retailPrice, 'PT')
                   : <span className="text-muted-foreground">—</span>}
               </TableCell>
               <TableCell>
