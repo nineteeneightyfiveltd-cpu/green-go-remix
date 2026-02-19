@@ -3221,10 +3221,10 @@ serve(async (req) => {
             logWarn(`[${requestId}] Step 1: Local shipping save failed`, { error: String(localSaveErr).slice(0, 100) });
           }
 
-          if (!existingShipping) {
-            logInfo(`[${requestId}] Step 1: Waiting 1500ms for propagation`);
-            await sleep(1500);
-          }
+          // Always wait — Dr. Green API needs time to register shipping before cart adds
+          const shippingWait = existingShipping ? 1500 : 3000;
+          logInfo(`[${requestId}] Step 1: Waiting ${shippingWait}ms for Dr. Green API shipping propagation`);
+          await sleep(shippingWait);
         }
         
         // Step 1.5: Clear any stale cart to prevent 409 conflicts
@@ -3266,10 +3266,11 @@ serve(async (req) => {
           
           for (let i = 0; i < cartItems.length; i++) {
             const item = cartItems[i];
-          // Nested format required by Dr. Green API: POST /dapp/carts { clientCartId, items[] }
+          // Flat format required by Dr. Green API: POST /dapp/carts { clientId, strainId, quantity }
           const itemPayload = {
-              clientCartId: clientId,
-              items: [{ strainId: item.strainId, quantity: item.quantity }],
+              clientId: clientId,
+              strainId: item.strainId,
+              quantity: item.quantity,
             };
             
             try {
@@ -3425,8 +3426,8 @@ serve(async (req) => {
           for (let i = 0; i < cartItems.length; i++) {
             const item = cartItems[i];
             try {
-              // Nested format required by Dr. Green API: POST /dapp/carts { clientCartId, items[] }
-              const itemPayload = { clientCartId: clientId, items: [{ strainId: item.strainId, quantity: item.quantity }] };
+              // Flat format required by Dr. Green API: POST /dapp/carts { clientId, strainId, quantity }
+              const itemPayload = { clientId: clientId, strainId: item.strainId, quantity: item.quantity };
               const resp = await drGreenRequestBody("/dapp/carts", "POST", itemPayload, true, adminEnvConfig);
               if (!resp.ok) {
                 const errText = await resp.clone().text();
